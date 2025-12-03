@@ -1,0 +1,31 @@
+# Node
+node_modules/
+dist/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# System
+.DS_Store
+
+# Environment variables
+.env
+.env.*
+
+# TypeScript
+*.tsbuildinfo
+
+# Ignore entire storage folder
+storage/
+
+# Optional: ignore IDE/editor folders
+.vscode/
+.idea/
+
+# Optional: temp/cache
+tmp/
+temp/
+.cache/
