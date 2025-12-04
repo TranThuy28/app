@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import axios from 'axios';
 import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
@@ -65,7 +66,15 @@ app.post('/api/try-on', upload.single('user_image'), async (req, res) => {
 
     const userImagePath = file.path;
 
-    const tryResolvePath = (relativePath: string) => {
+    const tryResolvePath = async (relativePath: string) => {
+      if (relativePath.startsWith('http://') || relativePath.startsWith('https://')) {
+        // Download the remote image to a temp file so VTON can read it
+        const resp = await axios.get(relativePath, { responseType: 'arraybuffer' });
+        const tempPath = path.join(uploadsDir, `product-${Date.now()}.jpg`);
+        fs.writeFileSync(tempPath, resp.data);
+        return tempPath;
+      }
+
       const firstAttempt = path.isAbsolute(relativePath)
         ? relativePath
         : path.resolve(relativePath);
@@ -77,7 +86,7 @@ app.post('/api/try-on', upload.single('user_image'), async (req, res) => {
       throw new Error(`Cannot find product image at ${relativePath}`);
     };
 
-    const productImagePath = tryResolvePath(productImageRelative);
+    const productImagePath = await tryResolvePath(productImageRelative);
 
     const outputFileName = `tryon-${Date.now()}-${path.parse(file.filename).name}.png`;
     const outputPath = path.join(tryOnDir, outputFileName);
@@ -94,6 +103,27 @@ app.post('/api/try-on', upload.single('user_image'), async (req, res) => {
   } catch (error) {
     console.error('Error in /api/try-on:', error);
     res.status(500).json({ error: 'Failed to generate try-on image' });
+  }
+});
+
+app.delete('/api/products/:category/:id', (req, res) => {
+  try {
+    const { category, id } = req.params;
+    if (!category || !id) {
+      return res.status(400).json({ success: false, message: 'Category and id are required' });
+    }
+
+    const normalizedCategory = category as 'casual' | 'hanging' | 'office' | 'party';
+    const success = stylist.deleteProduct(normalizedCategory, id);
+
+    if (!success) {
+      return res.status(404).json({ success: false, message: 'Product not found' });
+    }
+
+    res.json({ success: true, message: 'Product deleted' });
+  } catch (error) {
+    console.error('Error deleting product:', error);
+    res.status(500).json({ success: false, message: 'Failed to delete product' });
   }
 });
 

@@ -1,9 +1,0 @@
-{
-	"id": "F3UzKyAJGsZrQVg",
-	"json": "{\"id\":\"F3UzKyAJGsZrQVg\",\"url\":\"https://www.amazon.com/s?k=formal+wear&crid=1G5RGS7KT1O7E&sprefix=formal+we%2Caps%2C402&ref=nb_sb_noss_2\",\"loadedUrl\":\"https://www.amazon.com/s?k=formal+wear&crid=1G5RGS7KT1O7E&sprefix=formal+we%2Caps%2C402&ref=nb_sb_noss_2\",\"uniqueKey\":\"https://www.amazon.com/s?crid=1G5RGS7KT1O7E&k=formal+wear&ref=nb_sb_noss_2&sprefix=formal+we%2Caps%2C402\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"label\":\"CATEGORY\",\"__crawlee\":{\"state\":4}},\"handledAt\":\"2025-12-03T02:00:11.732Z\"}",
-	"method": "GET",
-	"orderNo": null,
-	"retryCount": 0,
-	"uniqueKey": "https://www.amazon.com/s?crid=1G5RGS7KT1O7E&k=formal+wear&ref=nb_sb_noss_2&sprefix=formal+we%2Caps%2C402",
-	"url": "https://www.amazon.com/s?k=formal+wear&crid=1G5RGS7KT1O7E&sprefix=formal+we%2Caps%2C402&ref=nb_sb_noss_2"
-}

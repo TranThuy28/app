@@ -20,7 +20,7 @@ pnpm-debug.log*
 
 # Ignore entire storage folder
 storage/
-
+cookies/
 # Optional: ignore IDE/editor folders
 .vscode/
 .idea/

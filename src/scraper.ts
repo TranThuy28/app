@@ -1,6 +1,6 @@
 import type { PlaywrightCrawlingContext } from 'crawlee';
 import type { Page } from 'playwright';
-import { parseNumberFromSelector } from './utils.ts';
+import { parseNumberFromSelector, parseNumberValue } from './utils.ts';
 
 // Use the Cheerio type from PlaywrightCrawlingContext's parseWithCheerio
 type CheerioAPI = Awaited<ReturnType<PlaywrightCrawlingContext['parseWithCheerio']>>;
@@ -427,6 +427,8 @@ export interface ProductDetails {
     price: number;
     imageUrls: string[];
     size?: string;
+    sizes?: string[];
+    colors?: string[];
     productDetails: Record<string, string>;
     aboutThisItem: string[];
 }
@@ -438,12 +440,79 @@ export interface ProductDetails {
  * @param dynamicData - Dynamic data extracted via Playwright (optional)
  * @returns Object containing title, price, imageUrls, size, productDetails, and aboutThisItem
  */
+/**
+ * Robust price extraction with multiple fallback strategies
+ * @param $ - Cheerio instance
+ * @returns Extracted price as number, or 0 if not found
+ */
+const extractPriceRobust = ($: CheerioAPI): number => {
+    let price = 0;
+
+    // Strategy A: Extract whole + fraction (most common format)
+    const priceContainer = $('.a-price').first();
+    if (priceContainer.length > 0) {
+        const wholePart = priceContainer.find('.a-price-whole').first().text().trim();
+        const fractionPart = priceContainer.find('.a-price-fraction').first().text().trim();
+
+        if (wholePart || fractionPart) {
+            // Combine whole and fraction (e.g., "56" + "99" = "56.99")
+            let combinedPrice = '';
+            if (wholePart && fractionPart) {
+                combinedPrice = `${wholePart}.${fractionPart}`;
+            } else if (wholePart) {
+                combinedPrice = wholePart;
+            } else if (fractionPart) {
+                combinedPrice = `0.${fractionPart}`;
+            }
+            
+            if (combinedPrice) {
+                price = parseNumberValue(combinedPrice);
+                if (price > 0) {
+                    return price;
+                }
+            }
+        }
+    }
+
+    // Strategy B: Extract from .a-offscreen (fallback)
+    const offscreenPrice = $('.a-price .a-offscreen').first();
+    if (offscreenPrice.length > 0) {
+        const priceText = offscreenPrice.text().trim();
+        if (priceText) {
+            price = parseNumberValue(priceText);
+            if (price > 0) {
+                return price;
+            }
+        }
+    }
+
+    // Strategy C: Try span.priceToPay (original selector)
+    price = parseNumberFromSelector($, SELECTORS.PRICE);
+    if (price > 0) {
+        return price;
+    }
+
+    // Strategy D: Try .a-color-price (alternative format for deal prices)
+    const colorPrice = $('.a-color-price').first();
+    if (colorPrice.length > 0) {
+        const priceText = colorPrice.text().trim();
+        if (priceText) {
+            price = parseNumberValue(priceText);
+            if (price > 0) {
+                return price;
+            }
+        }
+    }
+
+    return price;
+};
+
 export const extractProductDetails = (
     $: CheerioAPI,
     dynamicData?: { productDetails: Record<string, string>; aboutThisItem: string[] }
 ): ProductDetails => {
     const title = $(SELECTORS.TITLE).first().text().trim();
-    const price = parseNumberFromSelector($, SELECTORS.PRICE);
+    const price = extractPriceRobust($);
     const imageUrls = extractImageUrls($);
     const size = extractSize($);
     

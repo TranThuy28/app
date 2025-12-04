@@ -7,7 +7,7 @@ import type { EnrichedProduct } from './enricher.ts';
  */
 export interface OutfitResult {
     items: EnrichedProduct[];
-    category: 'di_lam' | 'di_choi' | 'di_an' | 'di_tiec';
+    category: 'casual' | 'hanging' | 'office' | 'party';
     message: string;
 }
 
@@ -20,74 +20,58 @@ export class SimpleStylist {
     /**
      * Maps user message keywords to category folder
      */
-    private mapMessageToCategory(userMessage: string): 'di_lam' | 'di_choi' | 'di_an' | 'di_tiec' {
+    private mapMessageToCategory(userMessage: string): 'casual' | 'hanging' | 'office' | 'party' {
         const lowerMessage = userMessage.toLowerCase();
 
-        // di_lam: Work/Office keywords
-        const diLamKeywords = ['họp', 'công sở', 'đi làm', 'work', 'office', 'business', 'professional', 'corporate'];
-        if (diLamKeywords.some(keyword => lowerMessage.includes(keyword))) {
-            return 'di_lam';
+        // office keywords
+        const officeKeywords = ['họp', 'công sở', 'đi làm', 'work', 'office', 'business', 'professional', 'corporate', 'formal', 'trousers', 'blazer'];
+        if (officeKeywords.some(keyword => lowerMessage.includes(keyword))) {
+            return 'office';
         }
 
-        // di_tiec: Party/Wedding keywords
-        const diTiecKeywords = ['cưới', 'tiệc', 'party', 'prom', 'sang trọng', 'wedding', 'event', 'formal', 'evening'];
-        if (diTiecKeywords.some(keyword => lowerMessage.includes(keyword))) {
-            return 'di_tiec';
+        // party keywords
+        const partyKeywords = ['cưới', 'tiệc', 'party', 'prom', 'sang trọng', 'wedding', 'event', 'evening', 'cocktail', 'gala'];
+        if (partyKeywords.some(keyword => lowerMessage.includes(keyword))) {
+            return 'party';
         }
 
-        // di_an: Dining/Date keywords
-        const diAnKeywords = ['hẹn hò', 'ăn tối', 'nhà hàng', 'dinner', 'date', 'dining', 'restaurant', 'brunch'];
-        if (diAnKeywords.some(keyword => lowerMessage.includes(keyword))) {
-            return 'di_an';
+        // hanging (dining/date) keywords
+        const hangingKeywords = ['tops','club', 'night', 'night out','ăn tối', 'elegant', 'dinner', 'date', 'dining', 'restaurant', 'brunch', 'eat', 'hanging', "going out", 'going'];
+        if (hangingKeywords.some(keyword => lowerMessage.includes(keyword))) {
+            return 'hanging';
         }
 
-        // di_choi: Casual/Street keywords
-        const diChoiKeywords = ['cà phê', 'dạo phố', 'bạn bè', 'street', 'casual', 'everyday', 'daily'];
-        if (diChoiKeywords.some(keyword => lowerMessage.includes(keyword))) {
-            return 'di_choi';
+        // casual/street keywords
+        const casualKeywords = ['cà phê', 'dạo phố', 'bạn bè', 'street', 'casual', 'everyday', 'daily', 'đi chơi', 'chơi', 'phố', 'streetwear'];
+        if (casualKeywords.some(keyword => lowerMessage.includes(keyword))) {
+            return 'casual';
         }
 
-        // Default to di_choi
-        return 'di_choi';
+        // Default to casual
+        return 'hanging';
     }
 
     /**
-     * Reads all product IDs from a category folder
+     * Loads all products for a category from its JSON file.
      */
-    private getProductIds(category: string): string[] {
-        const categoryPath = path.join(this.productsBasePath, category);
-        
-        if (!fs.existsSync(categoryPath)) {
+    private loadCategory(category: 'casual' | 'hanging' | 'office' | 'party'): EnrichedProduct[] {
+        const filePath = path.join(this.productsBasePath, `${category}.json`);
+
+        if (!fs.existsSync(filePath)) {
             return [];
         }
 
         try {
-            const items = fs.readdirSync(categoryPath, { withFileTypes: true });
-            return items
-                .filter(item => item.isDirectory())
-                .map(item => item.name);
-        } catch (error) {
-            console.error(`Error reading category folder ${category}:`, error);
+            const raw = fs.readFileSync(filePath, 'utf-8');
+            const data = JSON.parse(raw);
+            if (Array.isArray(data)) {
+                return data as EnrichedProduct[];
+            }
+            console.warn(`Category file ${filePath} does not contain an array.`);
             return [];
-        }
-    }
-
-    /**
-     * Loads a product from its JSON file
-     */
-    private loadProduct(category: string, productId: string): EnrichedProduct | null {
-        const productPath = path.join(this.productsBasePath, category, productId, 'data.json');
-        
-        if (!fs.existsSync(productPath)) {
-            return null;
-        }
-
-        try {
-            const fileContent = fs.readFileSync(productPath, 'utf-8');
-            return JSON.parse(fileContent) as EnrichedProduct;
         } catch (error) {
-            console.error(`Error loading product ${productId}:`, error);
-            return null;
+            console.error(`Error reading category file ${filePath}:`, error);
+            return [];
         }
     }
 
@@ -110,10 +94,10 @@ export class SimpleStylist {
         // Step 1: Map message to category
         const category = this.mapMessageToCategory(userMessage);
 
-        // Step 2: Get all product IDs in that category
-        const productIds = this.getProductIds(category);
+        // Step 2: Load the entire category JSON
+        const products = this.loadCategory(category);
 
-        if (productIds.length === 0) {
+        if (products.length === 0) {
             return {
                 items: [],
                 category,
@@ -121,67 +105,47 @@ export class SimpleStylist {
             };
         }
 
-        // Step 3: Load all products and categorize them
-        const allProducts: EnrichedProduct[] = [];
-        const tops: EnrichedProduct[] = [];
-        const bottoms: EnrichedProduct[] = [];
-        const dresses: EnrichedProduct[] = [];
-        const sets: EnrichedProduct[] = [];
-
-        for (const productId of productIds) {
-            const product = this.loadProduct(category, productId);
-            if (product) {
-                allProducts.push(product);
-                
-                switch (product.category_main) {
-                    case 'top':
-                    case 'outerwear':
-                        tops.push(product);
-                        break;
-                    case 'bottom':
-                        bottoms.push(product);
-                        break;
-                    case 'dress':
-                        dresses.push(product);
-                        break;
-                    case 'set':
-                        sets.push(product);
-                        break;
-                }
-            }
-        }
-
-        // Step 4: Build full list of products for this category
-        const itemsWithPaths = allProducts.map(item => {
-            const imagePath = path.join('storage', 'products', category, item.id, '1.jpg');
-            return {
-                ...item,
-                image_url: imagePath.replace(/\\/g, '/'), // Normalize path separators
-            };
-        });
+        const shuffled = this.shuffle(products);
 
         return {
-            items: itemsWithPaths,
+            items: shuffled,
             category,
-            message: `Found ${itemsWithPaths.length} item(s) for ${category}`,
+            message: `Found ${products.length} item(s) for ${category}`,
         };
     }
 
     /**
      * Gets all available products in a category (for debugging/testing)
      */
-    getAllProductsInCategory(category: 'di_lam' | 'di_choi' | 'di_an' | 'di_tiec'): EnrichedProduct[] {
-        const productIds = this.getProductIds(category);
-        const products: EnrichedProduct[] = [];
+    getAllProductsInCategory(category: 'casual' | 'hanging' | 'office' | 'party'): EnrichedProduct[] {
+        return this.loadCategory(category);
+    }
 
-        for (const productId of productIds) {
-            const product = this.loadProduct(category, productId);
-            if (product) {
-                products.push(product);
-            }
+    /**
+     * Deletes a product by id from a specific category file.
+     */
+    deleteProduct(category: 'casual' | 'hanging' | 'office' | 'party', productId: string): boolean {
+        const filePath = path.join(this.productsBasePath, `${category}.json`);
+
+        if (!fs.existsSync(filePath)) {
+            return false;
         }
 
-        return products;
+        try {
+            const raw = fs.readFileSync(filePath, 'utf-8');
+            const data = JSON.parse(raw) as EnrichedProduct[];
+            const filtered = data.filter((item) => item.id !== productId);
+
+            if (filtered.length === data.length) {
+                return false; // no product removed
+            }
+
+            fs.writeFileSync(filePath, JSON.stringify(filtered, null, 2), 'utf-8');
+            return true;
+        } catch (error) {
+            console.error(`Failed to delete product ${productId} from ${category}:`, error);
+            return false;
+        }
     }
 }
 

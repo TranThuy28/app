@@ -4,13 +4,96 @@ dotenv.config();
 import { PlaywrightCrawler, log, RequestQueue } from 'crawlee';
 import type { PlaywrightCrawlingContext } from 'crawlee';
 import { firefox } from 'playwright';
-import { handleCaptchaBlocking, extractProductDetails, extractDynamicData } from './scraper.ts';
-import { enrichProductData } from './services/enricher.ts';
+import { handleCaptchaBlocking, extractProductDetails, extractDynamicData, type ProductDetails } from './scraper.ts';
+import { enrichProduct } from './services/enricher.ts';
 import type { EnrichedProduct } from './services/enricher.ts';
-import { downloadImage } from './utils/image-downloader.ts';
+import { scrapeProductFast } from './scraper-fast.ts';
+import { CookieManager } from './utils/cookie-manager.ts';
 import * as fs from 'fs';
 import * as path from 'path';
 
+// Global cookie manager instance (initialized in run())
+let cookieManager: CookieManager | null = null;
+
+// Track background enrichment jobs so the process doesn't exit early
+const activeProcessingPromises: Promise<void>[] = [];
+
+type RawProductForEnrichment = ProductDetails & { product_url?: string };
+
+/**
+ * Append enriched products to per-category master JSON files.
+ * Each category has a single file: storage/products/{category_folder}.json
+ */
+const appendEnrichedToCategoryFiles = async (products: EnrichedProduct[]): Promise<void> => {
+    if (products.length === 0) return;
+
+    const grouped: Record<string, EnrichedProduct[]> = {};
+    for (const p of products) {
+        if (!p.category_folder) continue;
+        if (!grouped[p.category_folder]) grouped[p.category_folder] = [];
+        grouped[p.category_folder].push(p);
+    }
+
+    for (const [category, items] of Object.entries(grouped)) {
+        const categoryFilePath = path.join('storage', 'products', `${category}.json`);
+        let existing: EnrichedProduct[] = [];
+
+        if (fs.existsSync(categoryFilePath)) {
+            try {
+                const raw = fs.readFileSync(categoryFilePath, 'utf-8');
+                existing = JSON.parse(raw) as EnrichedProduct[];
+            } catch (error) {
+                log.warning(`Failed to read existing category file ${categoryFilePath}, starting fresh.`, {
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
+
+        const combined = existing.concat(items);
+        fs.mkdirSync(path.dirname(categoryFilePath), { recursive: true });
+        fs.writeFileSync(categoryFilePath, JSON.stringify(combined, null, 2), 'utf-8');
+
+        log.info(`📦 Appended ${items.length} items to ${categoryFilePath} (total: ${combined.length})`);
+    }
+};
+
+/**
+ * Background job: enrich a batch of raw products using LLM in chunks of 5.
+ * Fire-and-forget from the scraper; this function is awaited only at the very end.
+ */
+const processBatchInBackground = async (products: RawProductForEnrichment[]): Promise<void> => {
+    if (products.length === 0) return;
+
+    log.info(`🧠 Starting background enrichment for batch of ${products.length} products...`);
+
+    const chunkSize = 5;
+    for (let i = 0; i < products.length; i += chunkSize) {
+        const chunk = products.slice(i, i + chunkSize);
+        log.info(`Enriching chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(products.length / chunkSize)} (${chunk.length} products)...`);
+
+        const enrichedChunk = await Promise.all(
+            chunk.map(async (raw) => {
+                try {
+                    const enriched = await enrichProduct(raw);
+                    return enriched;
+                } catch (error) {
+                    log.error('Failed to enrich product in chunk', {
+                        title: raw.title,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                    return null;
+                }
+            })
+        );
+
+        const validEnriched = enrichedChunk.filter((p): p is EnrichedProduct => p !== null);
+        if (validEnriched.length > 0) {
+            await appendEnrichedToCategoryFiles(validEnriched);
+        }
+    }
+
+    log.info(`✅ Background enrichment completed for batch of ${products.length} products.`);
+};
 
 /**
  * Main request handler for the PlaywrightCrawler
@@ -87,16 +170,67 @@ const requestHandler = async (context: PlaywrightCrawlingContext) => {
             const uniqueLinks = [...new Set(productLinks)];
             log.info(`Found ${uniqueLinks.length} valid product links.`);
 
-            // Manually add product links to queue
-            const requestQueue = (context as PlaywrightCrawlingContext & { requestQueue?: RequestQueue }).requestQueue;
+            // TURBO HYBRID STRATEGY + PARALLEL PIPELINE:
+            // Use Axios + Cheerio for fast scraping of RAW products,
+            // then launch background LLM enrichment jobs without blocking pagination.
             if (uniqueLinks.length > 0) {
-                log.info(`Enqueuing ${uniqueLinks.length} products...`);
-                await context.addRequests(
-                    uniqueLinks.map((url) => ({
-                        url,
-                        label: 'PRODUCT',
-                    }))
-                );
+                log.info(`🚀 Starting fast scraping of ${uniqueLinks.length} products (raw only, no images)...`);
+
+                // Process in smaller batches (scraping only; enrichment is handled separately)
+                const batchSize = 5;
+                for (let i = 0; i < uniqueLinks.length; i += batchSize) {
+                    const batch = uniqueLinks.slice(i, i + batchSize);
+                    log.info(`Scraping batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(uniqueLinks.length / batchSize)} (${batch.length} products)...`);
+
+                    const rawProductsForBatch: RawProductForEnrichment[] = [];
+
+                    // Parallel scraping with Promise.all
+                    const results = await Promise.all(
+                        batch.map(async (productUrl) => {
+                            try {
+                                if (!cookieManager || cookieManager.getPoolSize() === 0) {
+                                    log.warning(`No cookies available for ${productUrl}, skipping fast scrape...`);
+                                    return { success: false, url: productUrl };
+                                }
+
+                                const randomCookies = cookieManager.getRandomCookie();
+                                const productData = await scrapeProductFast(productUrl, randomCookies);
+
+                                if (productData) {
+                                    rawProductsForBatch.push({
+                                        ...productData,
+                                        product_url: productUrl,
+                                    });
+                                    return { success: true, url: productUrl };
+                                } else {
+                                    log.warning(`Failed to scrape product: ${productUrl}`);
+                                    return { success: false, url: productUrl };
+                                }
+                            } catch (error) {
+                                log.error(`Error scraping product ${productUrl}`, {
+                                    error: error instanceof Error ? error.message : String(error),
+                                });
+                                return { success: false, url: productUrl };
+                            }
+                        })
+                    );
+
+                    const successCount = results.filter((r) => r.success).length;
+                    log.info(`Batch scrape complete: ${successCount}/${batch.length} products scraped.`);
+
+                    // Launch background enrichment job (FIRE & FORGET)
+                    if (rawProductsForBatch.length > 0) {
+                        const jobPromise = processBatchInBackground(rawProductsForBatch);
+                        activeProcessingPromises.push(jobPromise);
+                    }
+
+                    // Small delay between batches to avoid rate limiting
+                    if (i + batchSize < uniqueLinks.length) {
+                        await new Promise((resolve) => setTimeout(resolve, 500));
+                    }
+                }
+
+                log.info(`✅ Completed raw scraping for ${uniqueLinks.length} products on this page (enrichment running in background).`);
             }
 
             // Handle Pagination - Find and enqueue next page
@@ -127,136 +261,7 @@ const requestHandler = async (context: PlaywrightCrawlingContext) => {
             return;
         }
 
-        // PRODUCT label: run scraping workflow
-
-        // Wait for product details section (reduced timeout for speed)
-        try {
-            await page.waitForSelector('#productOverview_feature_div', { timeout: 5000 })
-                .catch(() => log.info('Product details section not found, continuing...'));
-        } catch (error) {
-            log.warning('Timeout waiting for product details section', {
-                error: error instanceof Error ? error.message : String(error),
-            });
-        }
-
-        // Also wait for feature bullets (reduced timeout for speed)
-        try {
-            await page.waitForSelector('#feature-bullets', { timeout: 5000 })
-                .catch(() => log.info('Feature bullets section not found, continuing...'));
-        } catch (error) {
-            log.warning('Timeout waiting for feature bullets section', {
-                error: error instanceof Error ? error.message : String(error),
-            });
-        }
-
-        // Parse the rendered HTML with Cheerio
-        const $ = await context.parseWithCheerio();
-
-        // Check for captcha blocking
-        handleCaptchaBlocking($);
-
-        // Extract dynamic data using Playwright (handles Fashion layout)
-        let dynamicData;
-        try {
-            dynamicData = await extractDynamicData(page);
-            log.info('Dynamic data extracted', {
-                productDetailsCount: Object.keys(dynamicData.productDetails).length,
-                aboutThisItemCount: dynamicData.aboutThisItem.length,
-            });
-        } catch (error) {
-            log.warning('Failed to extract dynamic data, continuing with static data only', {
-                error: error instanceof Error ? error.message : String(error),
-            });
-            dynamicData = { productDetails: {}, aboutThisItem: [] };
-        }
-
-        // Step 1: Scrape Raw Data (merge static and dynamic)
-        const rawProduct = extractProductDetails($, dynamicData);
-        log.info('Raw product data extracted', {
-            title: rawProduct.title,
-            price: rawProduct.price,
-            imageCount: rawProduct.imageUrls.length,
-            productDetailsCount: Object.keys(rawProduct.productDetails).length,
-            aboutThisItemCount: rawProduct.aboutThisItem.length,
-        });
-
-        // Step 2: Enrich Data (Rule-Based, Synchronous - No API call)
-        let enrichedProduct: EnrichedProduct;
-        try {
-            enrichedProduct = enrichProductData(rawProduct, url); // Synchronous call, no await needed
-            log.info('Product data enriched successfully (rule-based)', {
-                id: enrichedProduct.id,
-                category: enrichedProduct.category_main,
-                category_folder: enrichedProduct.category_folder,
-                brand: enrichedProduct.brand,
-            });
-        } catch (enrichError) {
-            log.error('Failed to enrich product data', {
-                url,
-                error: enrichError instanceof Error ? enrichError.message : String(enrichError),
-            });
-            
-            // Save to failed folder if enrichment fails
-            const failedFolder = path.join('storage', 'products', 'failed');
-            if (!fs.existsSync(failedFolder)) {
-                fs.mkdirSync(failedFolder, { recursive: true });
-            }
-            const failedFilePath = path.join(failedFolder, `failed-${Date.now()}.json`);
-            fs.writeFileSync(failedFilePath, JSON.stringify(rawProduct, null, 2), 'utf-8');
-            log.warning(`Saved failed product to ${failedFilePath}`);
-            return; // Skip further processing
-        }
-
-        // Step 3: Determine Storage Path (using category_folder from enriched data)
-        const productFolder = path.join('products', enrichedProduct.category_folder, enrichedProduct.id);
-        const fullProductPath = path.join('storage', productFolder);
-        
-        // Ensure the folder exists
-        if (!fs.existsSync(fullProductPath)) {
-            fs.mkdirSync(fullProductPath, { recursive: true });
-        }
-        
-        log.info(`Product folder: ${productFolder}`);
-
-        // Step 4: Download Images
-        const imageUrls = rawProduct.imageUrls.slice(0, 5); // Limit to top 5
-        const downloadedImagePaths: string[] = [];
-
-        for (let i = 0; i < imageUrls.length; i++) {
-            const imageUrl = imageUrls[i];
-            if (!imageUrl) continue;
-
-            // Clean the image URL (remove query parameters that might cause issues)
-            const cleanUrl = imageUrl.split('?')[0];
-            
-            const localPath = await downloadImage(cleanUrl, productFolder, i + 1);
-            if (localPath) {
-                downloadedImagePaths.push(localPath);
-            }
-        }
-
-        // Update enriched product with first image path
-        if (downloadedImagePaths.length > 0) {
-            enrichedProduct.image_url = downloadedImagePaths[0];
-        }
-
-        // Step 5: Save JSON
-        const jsonFilePath = path.join(fullProductPath, 'data.json');
-        fs.writeFileSync(jsonFilePath, JSON.stringify(enrichedProduct, null, 2), 'utf-8');
-        log.info(`Saved enriched product data to ${jsonFilePath}`);
-
-        // Push data to dataset (backup summary log)
-        await context.pushData(enrichedProduct);
-
-        log.info(`Successfully scraped and enriched product`, {
-            id: enrichedProduct.id,
-            title: enrichedProduct.title,
-            brand: enrichedProduct.brand,
-            category: enrichedProduct.category_main,
-            price: enrichedProduct.price,
-            imageCount: downloadedImagePaths.length,
-            jsonPath: jsonFilePath,
-        });
+        // For non-CATEGORY labels we currently do nothing (all work is done in CATEGORY pages)
     } catch (error) {
         // Check if it's a timeout error
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -282,6 +287,14 @@ const requestHandler = async (context: PlaywrightCrawlingContext) => {
  * Initialize and run the crawler
  */
 const run = async () => {
+    // Initialize Cookie Manager and load all cookie profiles
+    cookieManager = new CookieManager();
+    const cookiesLoaded = cookieManager.loadAllCookies('cookies');
+    
+    if (cookiesLoaded === 0) {
+        log.warning('⚠️  No cookies loaded! Scraping may fail due to bot detection.');
+    }
+
     // Initialize the PlaywrightCrawler
     const crawler = new PlaywrightCrawler({
         requestHandler,
@@ -329,31 +342,15 @@ const run = async () => {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 });
 
-                // Inject real user cookies if available
+                // Inject random cookie from pool (rotation strategy)
                 try {
-                    const cookieFilePath = path.join(process.cwd(), 'amazon_cookies.json');
-                    if (fs.existsSync(cookieFilePath)) {
-                        const cookiesString = fs.readFileSync(cookieFilePath, 'utf8');
-                        const rawCookies = JSON.parse(cookiesString);
-                        const validCookies = rawCookies.map((cookie: any) => {
-                            const mappedCookie: any = {
-                                name: cookie.name,
-                                value: cookie.value,
-                                domain: cookie.domain || '.amazon.com',
-                                path: cookie.path || '/',
-                                secure: cookie.secure,
-                                httpOnly: cookie.httpOnly,
-                            };
-
-                            if (cookie.sameSite === 'no_restriction') mappedCookie.sameSite = 'None';
-                            else if (cookie.sameSite === 'Strict' || cookie.sameSite === 'Lax') mappedCookie.sameSite = cookie.sameSite;
-
-                            if (cookie.expirationDate) mappedCookie.expires = cookie.expirationDate;
-
-                            return mappedCookie;
-                        });
+                    if (cookieManager && cookieManager.getPoolSize() > 0) {
+                        const randomCookies = cookieManager.getRandomCookie();
+                        const validCookies = CookieManager.toPlaywrightCookies(randomCookies);
+                        
                         if (validCookies.length > 0 && browserContext) {
                             await browserContext.addCookies(validCookies);
+                            log.debug(`Injected random cookie profile (${validCookies.length} cookies)`);
                         }
                     }
                 } catch (error) {
@@ -371,7 +368,7 @@ const run = async () => {
     });
 
     // Sample Amazon category/search URL
-    const startUrl = 'https://www.amazon.com/s?k=formal+wear&crid=1G5RGS7KT1O7E&sprefix=formal+we%2Caps%2C402&ref=nb_sb_noss_2';
+    const startUrl = 'https://www.amazon.com/s?k=going+out&crid=3I0XLFKHB0SYQ&sprefix=going+out%2Caps%2C397&ref=nb_sb_noss_2';
 
     log.info('Starting crawler...', { startUrl });
 
@@ -383,7 +380,15 @@ const run = async () => {
         },
     ]);
 
-    log.info('Crawler finished!');
+    log.info('Crawler finished! Waiting for background enrichment jobs to complete...');
+
+    // Wait for all background enrichment jobs
+    if (activeProcessingPromises.length > 0) {
+        await Promise.all(activeProcessingPromises);
+        log.info('All background enrichment jobs completed.');
+    } else {
+        log.info('No background enrichment jobs were scheduled.');
+    }
 };
 
 // Run the scraper
