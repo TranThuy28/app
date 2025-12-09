@@ -6,7 +6,7 @@ import type { PlaywrightCrawlingContext } from 'crawlee';
 import { firefox } from 'playwright';
 import { handleCaptchaBlocking, extractProductDetails, extractDynamicData, type ProductDetails } from './scraper.ts';
 import { enrichProduct } from './services/enricher.ts';
-import type { EnrichedProduct } from './services/enricher.ts';
+import type { EnrichedProduct, CategoryOccasion, CategoryType } from './services/enricher.ts';
 import { scrapeProductFast } from './scraper-fast.ts';
 import { CookieManager } from './utils/cookie-manager.ts';
 import * as fs from 'fs';
@@ -21,21 +21,33 @@ const activeProcessingPromises: Promise<void>[] = [];
 type RawProductForEnrichment = ProductDetails & { product_url?: string };
 
 /**
- * Append enriched products to per-category master JSON files.
- * Each category has a single file: storage/products/{category_folder}.json
+ * Append enriched products to hierarchical master JSON files.
+ * Each occasion + type pair has its own file: storage/products/{category_occasion}/{category_type}.json
+ * Example: storage/products/office/top.json
  */
 const appendEnrichedToCategoryFiles = async (products: EnrichedProduct[]): Promise<void> => {
     if (products.length === 0) return;
 
     const grouped: Record<string, EnrichedProduct[]> = {};
+
     for (const p of products) {
-        if (!p.category_folder) continue;
-        if (!grouped[p.category_folder]) grouped[p.category_folder] = [];
-        grouped[p.category_folder].push(p);
+        // Fallbacks in case older records don't have new fields
+        const occasion: CategoryOccasion = p.category_occasion || p.category_folder || 'casual';
+        const type: CategoryType = p.category_type || (p.category_main as CategoryType) || 'top';
+
+        const key = `${occasion}/${type}`;
+        if (!grouped[key]) grouped[key] = [];
+        grouped[key].push({
+            ...p,
+            category_occasion: occasion,
+            category_folder: occasion,
+            category_type: type,
+        });
     }
 
-    for (const [category, items] of Object.entries(grouped)) {
-        const categoryFilePath = path.join('storage', 'products', `${category}.json`);
+    for (const [key, items] of Object.entries(grouped)) {
+        const [occasion, type] = key.split('/') as [CategoryOccasion, CategoryType];
+        const categoryFilePath = path.join('storage', 'products', occasion, `${type}.json`);
         let existing: EnrichedProduct[] = [];
 
         if (fs.existsSync(categoryFilePath)) {
@@ -53,7 +65,9 @@ const appendEnrichedToCategoryFiles = async (products: EnrichedProduct[]): Promi
         fs.mkdirSync(path.dirname(categoryFilePath), { recursive: true });
         fs.writeFileSync(categoryFilePath, JSON.stringify(combined, null, 2), 'utf-8');
 
-        log.info(`📦 Appended ${items.length} items to ${categoryFilePath} (total: ${combined.length})`);
+        log.info(
+            `📦 Appended ${items.length} items to ${categoryFilePath} (occasion=${occasion}, type=${type}, total: ${combined.length})`,
+        );
     }
 };
 
@@ -368,7 +382,7 @@ const run = async () => {
     });
 
     // Sample Amazon category/search URL
-    const startUrl = 'https://www.amazon.com/s?k=going+out&crid=3I0XLFKHB0SYQ&sprefix=going+out%2Caps%2C397&ref=nb_sb_noss_2';
+    const startUrl = 'https://www.amazon.com/s?k=night+out+tops&crid=38G7N4MMOWJVB&sprefix=night+out+t%C3%B3p%2Caps%2C341&ref=nb_sb_noss';
 
     log.info('Starting crawler...', { startUrl });
 

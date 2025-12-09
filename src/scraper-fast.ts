@@ -5,6 +5,21 @@ import type { ProductDetails } from './scraper.ts';
 // Cheerio API type
 type CheerioAPI = ReturnType<typeof cheerio.load>;
 
+// Modern desktop user-agents
+const USER_AGENTS = [
+    // Chrome (Win/Mac)
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    // Firefox
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13.6; rv:123.0) Gecko/20100101 Firefox/123.0',
+    // Safari
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+];
+
+const delay = (ms: number) => new Promise((res) => setTimeout(res, ms));
+const randomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+
 /**
  * Converts Playwright cookie array to Cookie header string
  * @param cookies - Array of cookie objects from Playwright
@@ -428,84 +443,114 @@ export const scrapeProductFast = async (
     url: string,
     cookies: any[] = []
 ): Promise<ProductDetails | null> => {
-    try {
-        // Convert cookies to header string
-        const cookieHeader = cookies.length > 0 ? cookiesToHeaderString(cookies) : '';
+    // Convert cookies to header string
+    const cookieHeader = cookies.length > 0 ? cookiesToHeaderString(cookies) : '';
 
-        // Make HTTP request with cookies and browser-like headers
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent':
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                Connection: 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                ...(cookieHeader ? { Cookie: cookieHeader } : {}),
-            },
-            timeout: 10000, // 10 second timeout
-            maxRedirects: 5,
-        });
+    const maxRetries = 3;
+    let lastError: unknown = null;
 
-        // Load HTML with Cheerio
-        const $ = cheerio.load(response.data);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        // Human-like random pause before each request
+        const preDelay = Math.random() * 2000 + 1000;
+        await delay(preDelay);
 
-        // Check for captcha or error pages
-        if ($('[action="/errors/validateCaptcha"]').length > 0) {
-            console.warn(`Captcha detected for ${url}`);
-            return null;
+        try {
+            const userAgent = randomUserAgent();
+            const response = await axios.get(url, {
+                headers: {
+                    'User-Agent': userAgent,
+                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    Connection: 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    Referer: 'https://www.google.com/',
+                    ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+                },
+                timeout: 12000, // 12 second timeout
+                maxRedirects: 5,
+                validateStatus: () => true, // We'll handle status codes manually
+            });
+
+            const body = response.data?.toString() || '';
+            const bodyLower = body.toLowerCase();
+            const isCaptcha = bodyLower.includes('captcha') || bodyLower.includes('dogs of amazon');
+            const is503 = response.status === 503;
+
+            if (isCaptcha || is503) {
+                console.warn(`Captcha/503 detected (attempt ${attempt}) for ${url}`);
+                lastError = `Captcha/503 attempt ${attempt}`;
+            } else {
+                // Load HTML with Cheerio
+                const $ = cheerio.load(body);
+
+                // Additional captcha/error checks
+                if ($('[action="/errors/validateCaptcha"]').length > 0) {
+                    console.warn(`Captcha form detected (attempt ${attempt}) for ${url}`);
+                    lastError = 'Captcha form';
+                } else if ($('title').text().toLowerCase().includes('sorry')) {
+                    console.warn(`Error page detected (attempt ${attempt}) for ${url}`);
+                    lastError = 'Error page';
+                } else {
+                    // Extract title
+                    const title = $('#productTitle').text().trim();
+                    if (!title) {
+                        console.warn(`No title found for ${url}`);
+                        return null;
+                    }
+
+                    // Extract price (using robust multi-strategy extraction)
+                    const price = normalizePriceToUSD(extractPrice($, url));
+
+                    // Extract images
+                    const imageUrls = extractImageUrls($);
+
+                    // Extract productDetails
+                    const productDetails = extractProductDetails($);
+
+                    // Extract aboutThisItem
+                    const aboutThisItem = extractAboutThisItem($);
+
+                    // Extract sizes and colors
+                    const sizes = extractAllSizes($);
+                    const colors = extractAllColors($);
+
+                    // Keep backward-compatible single selected size if available
+                    const selectedSizeElement = $('#inline-twister-expanded-dimension-text-size_name, #variation_size_name .selection').first();
+                    const size = selectedSizeElement.length > 0 ? selectedSizeElement.text().trim() : sizes[0];
+
+                    return {
+                        title,
+                        price,
+                        imageUrls,
+                        size,
+                        sizes,
+                        colors,
+                        productDetails,
+                        aboutThisItem,
+                    };
+                }
+            }
+        } catch (error) {
+            lastError = error;
+            if (axios.isAxiosError(error)) {
+                console.error(`Axios error scraping ${url} (attempt ${attempt}):`, error.message);
+                // Retry on 503 specifically
+                if (error.response?.status !== 503 && attempt === maxRetries) {
+                    break;
+                }
+            } else {
+                console.error(`Error scraping ${url} (attempt ${attempt}):`, error instanceof Error ? error.message : String(error));
+            }
         }
 
-        if ($('title').text().toLowerCase().includes('sorry')) {
-            console.warn(`Error page detected for ${url}`);
-            return null;
+        if (attempt < maxRetries) {
+            const backoff = 2000 * Math.pow(2, attempt - 1); // 2s, 4s, 8s
+            await delay(backoff);
         }
-
-        // Extract title
-        const title = $('#productTitle').text().trim();
-        if (!title) {
-            console.warn(`No title found for ${url}`);
-            return null;
-        }
-
-        // Extract price (using robust multi-strategy extraction)
-        const price = normalizePriceToUSD(extractPrice($, url));
-
-        // Extract images
-        const imageUrls = extractImageUrls($);
-
-        // Extract productDetails
-        const productDetails = extractProductDetails($);
-
-        // Extract aboutThisItem
-        const aboutThisItem = extractAboutThisItem($);
-
-        // Extract sizes and colors
-        const sizes = extractAllSizes($);
-        const colors = extractAllColors($);
-
-        // Keep backward-compatible single selected size if available
-        const selectedSizeElement = $('#inline-twister-expanded-dimension-text-size_name, #variation_size_name .selection').first();
-        const size = selectedSizeElement.length > 0 ? selectedSizeElement.text().trim() : sizes[0];
-
-        return {
-            title,
-            price,
-            imageUrls,
-            size,
-            sizes,
-            colors,
-            productDetails,
-            aboutThisItem,
-        };
-    } catch (error) {
-        if (axios.isAxiosError(error)) {
-            console.error(`Axios error scraping ${url}:`, error.message);
-        } else {
-            console.error(`Error scraping ${url}:`, error instanceof Error ? error.message : String(error));
-        }
-        return null;
     }
+
+    console.error(`Failed to scrape ${url} after ${maxRetries} attempts. Last error:`, lastError);
+    return null;
 };
 

@@ -12,7 +12,8 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const storageRoot = path.join(process.cwd(), 'storage');
 const uploadsDir = path.join(storageRoot, 'uploads');
@@ -44,14 +45,16 @@ app.post('/api/suggest', async (req, res) => {
     if (!message) {
       return res.status(400).json({ error: 'message is required' });
     }
-    const suggestions = await stylist.suggestOutfit(message);
-    res.json(suggestions);
+    const result = await stylist.suggestPersonalizedOutfits(message);
+    // Return in the format expected by frontend: { outfits: [...] }
+    res.json({ outfits: result.outfits });
   } catch (error) {
     console.error('Error in /api/suggest:', error);
     res.status(500).json({ error: 'Failed to fetch suggestions' });
   }
 });
 
+// Legacy endpoint for single product try-on (kept for backward compatibility)
 app.post('/api/try-on', upload.single('user_image'), async (req, res) => {
   try {
     const query = req.body.query;
@@ -103,6 +106,44 @@ app.post('/api/try-on', upload.single('user_image'), async (req, res) => {
   } catch (error) {
     console.error('Error in /api/try-on:', error);
     res.status(500).json({ error: 'Failed to generate try-on image' });
+  }
+});
+
+// New endpoint for full outfit try-on
+app.post('/api/try-on-outfit', async (req, res) => {
+  try {
+    const { userImage, productUrls } = req.body;
+
+    if (!userImage || !productUrls || !Array.isArray(productUrls) || productUrls.length === 0) {
+      return res.status(400).json({
+        error: 'userImage (base64 string) and productUrls (array of strings) are required',
+      });
+    }
+
+    // Remove data URL prefix if present
+    const cleanUserImage = userImage.replace(/^data:image\/[^;]+;base64,/, '');
+
+    console.log(`🎬 Starting full outfit try-on with ${productUrls.length} products...`);
+
+    // Call the new generateVton method
+    const resultImageBase64 = await vtonService.generateVton(cleanUserImage, productUrls);
+
+    // Save the result image
+    const outputFileName = `tryon-outfit-${Date.now()}.png`;
+    const outputPath = path.join(tryOnDir, outputFileName);
+    const outputBuffer = Buffer.from(resultImageBase64, 'base64');
+    fs.writeFileSync(outputPath, outputBuffer);
+
+    res.json({
+      success: true,
+      image_url: `/storage/try-on/${outputFileName}`,
+    });
+  } catch (error) {
+    console.error('Error in /api/try-on-outfit:', error);
+    res.status(500).json({
+      error: 'Failed to generate outfit try-on image',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
   }
 });
 

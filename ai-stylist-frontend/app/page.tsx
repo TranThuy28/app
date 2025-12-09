@@ -1,12 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { ImageUploader } from "@/components/ImageUploader";
-import { ProductCard } from "@/components/ProductCard";
+import { OutfitGroup } from "@/components/OutfitGroup";
 import { ResultModal } from "@/components/ResultModal";
-import { deleteProduct as deleteProductApi, generateTryOn, suggestOutfits } from "@/lib/api";
-import { motion } from "framer-motion";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { deleteProduct as deleteProductApi, generateTryOn, generateOutfitTryOn, suggestOutfits } from "@/lib/api";
 
 type Product = {
   id: string;
@@ -19,19 +17,23 @@ type Product = {
   category_folder?: 'casual' | 'hanging' | 'office' | 'party';
 };
 
+type Outfit = {
+  name: string;
+  reasoning: string;
+  items: Product[];
+};
+
 export default function Home() {
   const [userFile, setUserFile] = useState<File | null>(null);
   const [userPreview, setUserPreview] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("Minimalist office look for tomorrow's board meeting.");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [outfits, setOutfits] = useState<Product[]>([]);
+  const [outfits, setOutfits] = useState<Outfit[]>([]);
   const [showWardrobe, setShowWardrobe] = useState(false);
-  const [currentPage, setCurrentPage] = useState(0);
   const [modalOpen, setModalOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [resultImage, setResultImage] = useState<string | undefined>(undefined);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const ITEMS_PER_PAGE = 10;
 
   const handleAnalyze = async () => {
     if (!prompt.trim()) return;
@@ -40,14 +42,13 @@ export default function Home() {
       console.log('Calling suggestOutfits with prompt:', prompt);
       const data = await suggestOutfits(prompt);
       console.log('Received data from backend:', data);
-      // Backend /api/suggest trả về dạng { items, category, message }
-      const list: Product[] = data?.items ?? data?.products ?? [];
-      console.log('Extracted items:', list.length);
-      setOutfits(list);
-      setShowWardrobe(list.length > 0);
-      setCurrentPage(0);
-      if (list.length === 0) {
-        alert('No products found. Please try a different prompt or check if the backend server is running.');
+      // Backend now returns { outfits: [...] }
+      const outfitsList: Outfit[] = data?.outfits ?? [];
+      console.log('Extracted outfits:', outfitsList.length);
+      setOutfits(outfitsList);
+      setShowWardrobe(outfitsList.length > 0);
+      if (outfitsList.length === 0) {
+        alert('No outfits found. Please try a different prompt or check if the backend server is running.');
       }
     } catch (error: any) {
       console.error("Failed to fetch outfits", error);
@@ -57,12 +58,6 @@ export default function Home() {
       setIsAnalyzing(false);
     }
   };
-
-  const totalPages = useMemo(() => Math.max(1, Math.ceil(outfits.length / ITEMS_PER_PAGE)), [outfits.length]);
-  const visibleProducts = useMemo(
-    () => outfits.slice(currentPage * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE + ITEMS_PER_PAGE),
-    [outfits, currentPage]
-  );
 
   const handleProductSelect = async (product: Product) => {
     if (!userFile) {
@@ -96,17 +91,57 @@ export default function Home() {
     }
     try {
       await deleteProductApi(product.category_folder, product.id);
+      // Remove the product from all outfits
       setOutfits((prev) => {
-        const next = prev.filter((item) => item.id !== product.id);
-        const newTotalPages = Math.max(1, Math.ceil(next.length / ITEMS_PER_PAGE));
-        setCurrentPage((prevPage) =>
-          prevPage >= newTotalPages ? Math.max(0, newTotalPages - 1) : prevPage
-        );
-        return next;
+        return prev.map((outfit) => ({
+          ...outfit,
+          items: outfit.items.filter((item) => item.id !== product.id),
+        })).filter((outfit) => outfit.items.length > 0); // Remove outfits with no items
       });
     } catch (error) {
       console.error('Failed to delete product', error);
     }
+  };
+
+  const handleOutfitTryOn = async (productUrls: string[]) => {
+    if (!userFile) {
+      alert("Please upload your photo first.");
+      return;
+    }
+
+    // Convert user file to base64
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const userImageBase64 = reader.result as string;
+      
+      setSelectedProduct(null); // Clear single product selection
+      setModalOpen(true);
+      setIsGenerating(true);
+      setResultImage(undefined);
+
+      try {
+        const response = await generateOutfitTryOn(userImageBase64, productUrls);
+        const imageUrl =
+          response?.image_url ||
+          response?.result_image ||
+          response?.result ||
+          response?.data ||
+          null;
+        setResultImage(imageUrl ?? undefined);
+      } catch (error) {
+        console.error("Failed to generate outfit try-on", error);
+        alert("Failed to generate outfit try-on. Please try again.");
+      } finally {
+        setIsGenerating(false);
+      }
+    };
+
+    reader.onerror = () => {
+      alert("Failed to read user image. Please try again.");
+      setIsGenerating(false);
+    };
+
+    reader.readAsDataURL(userFile);
   };
 
   return (
@@ -144,50 +179,23 @@ export default function Home() {
         </section>
 
         {showWardrobe && outfits.length > 0 && (
-          <section className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm uppercase tracking-[0.4em] text-white/50">Wardrobe</p>
-                <h2 className="text-2xl font-semibold text-white">Curated Picks</h2>
-              </div>
-        </div>
+          <section className="space-y-8">
+            <div>
+              <p className="text-sm uppercase tracking-[0.4em] text-white/50">Wardrobe</p>
+              <h2 className="mt-2 text-2xl font-semibold text-white">Complete Outfits</h2>
+            </div>
 
-            <div className="relative flex items-center">
-              <button
-                onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
-                disabled={currentPage === 0}
-                className="absolute -left-16 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20 disabled:opacity-30"
-              >
-                <ChevronLeft className="h-5 w-5" />
-              </button>
-              <motion.div
-                key={currentPage}
-                initial={{ opacity: 0, x: currentPage > 0 ? 50 : -50 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.3 }}
-                className="grid w-full gap-6 pb-4 md:grid-cols-5"
-              >
-                {visibleProducts.map((product: Product) => (
-                  <ProductCard
-                    key={product.id}
-                    product={product}
-                    onSelect={handleProductSelect}
-                    onDelete={() => handleDelete(product)}
-            />
-                ))}
-              </motion.div>
-              <button
-                onClick={() => setCurrentPage((p) => Math.min(totalPages - 1, p + 1))}
-                disabled={currentPage >= totalPages - 1}
-                className="absolute -right-16 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20 disabled:opacity-30"
-              >
-                <ChevronRight className="h-5 w-5" />
-              </button>
-        </div>
-
-            <p className="text-center text-sm text-white/70">
-              Page {Math.min(currentPage + 1, totalPages)} of {totalPages}
-            </p>
+            <div className="space-y-8">
+              {outfits.map((outfit, index) => (
+                <OutfitGroup
+                  key={index}
+                  outfit={outfit}
+                  onProductSelect={handleProductSelect}
+                  onProductDelete={handleDelete}
+                  onTryOn={handleOutfitTryOn}
+                />
+              ))}
+            </div>
           </section>
         )}
       </main>

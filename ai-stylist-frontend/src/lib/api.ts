@@ -54,6 +54,15 @@ export const generateTryOn = async (userImage: File, product: any) => {
   return data;
 };
 
+export const generateOutfitTryOn = async (userImageBase64: string, productUrls: string[]) => {
+  const { data } = await api.post('/try-on-outfit', {
+    userImage: userImageBase64,
+    productUrls: productUrls,
+  });
+
+  return data;
+};
+
 export const deleteProduct = async (category: string, id: string) => {
   const { data } = await api.delete(`/products/${category}/${id}`);
   return data;

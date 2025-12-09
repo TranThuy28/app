@@ -2,6 +2,9 @@ import { log } from 'crawlee';
 import axios from 'axios';
 import type { ProductDetails } from '../scraper.ts';
 
+export type CategoryOccasion = 'casual' | 'hanging' | 'office' | 'party';
+export type CategoryType = 'top' | 'bottom' | 'dress' | 'outerwear' | 'shoes' | 'bag' | 'accessory' | 'set';
+
 /**
  * Enriched product data interface matching the strict schema
  */
@@ -11,9 +14,23 @@ export interface EnrichedProduct {
     brand: string;
     product_url: string;
     image_url: string; // The high-res local path or URL
-    category_main: 'outerwear' | 'top' | 'bottom' | 'dress' | 'shoes' | 'accessory' | 'set';
+    /**
+     * High-level garment type (kept for backward compatibility)
+     */
+    category_main: Exclude<CategoryType, 'bag'> | 'accessory';
     category_sub: string; // e.g., "long_hooded_jacket", "pencil_skirt"
-    category_folder: 'casual' | 'hanging' | 'office' | 'party'; // Occasion-based classification
+    /**
+     * Occasion (primary dimension)
+     */
+    category_occasion: CategoryOccasion;
+    /**
+     * Item type (secondary dimension, used for hierarchical storage)
+     */
+    category_type: CategoryType;
+    /**
+     * Legacy occasion field (kept for compatibility, mirrors category_occasion)
+     */
+    category_folder: CategoryOccasion;
     gender: 'womens';
     age_group: 'adult'; // Target 20-35
     description: string; // Generated from bullet points
@@ -26,7 +43,7 @@ export interface EnrichedProduct {
     season: string[];
     style_tags: string[]; // e.g., ["office", "chic", "streetwear"]
     occasion_tags: string[]; // e.g., ["work", "party", "daily"]
-    sizes: string[]; // Scraped sizes
+    sizes: string[]; // Normalized sizes
     price: number;
     currency: 'usd' | 'vnd';
     is_set: boolean; // true if it's a 2-piece set
@@ -124,6 +141,68 @@ const inferCategory = (title: string): { category_main: EnrichedProduct['categor
 };
 
 /**
+ * Normalize size strings based on category_type.
+ * - Clothes: map to XS / S / M / L / XL / XXL...
+ * - Shoes: numeric strings only ("36", "37", "38", ...)
+ * - Bags / Accessories: "One Size" (or existing strings cleaned)
+ */
+const normalizeSizes = (categoryType: CategoryType, rawSizes: unknown): string[] => {
+    const toArray = (value: unknown): string[] => {
+        if (!value) return [];
+        if (Array.isArray(value)) return value.map((v) => String(v));
+        if (typeof value === 'string') {
+            return value
+                .split(/[\/,]|or/gi)
+                .map((v) => v.trim())
+                .filter(Boolean);
+        }
+        return [];
+    };
+
+    const upper = toArray(rawSizes).map((s) => s.toUpperCase());
+
+    if (categoryType === 'shoes') {
+        const numeric = upper
+            .map((s) => s.replace(/[^\d.]/g, ''))
+            .filter((s) => s.length > 0);
+        return Array.from(new Set(numeric));
+    }
+
+    if (categoryType === 'bag' || categoryType === 'accessory') {
+        if (upper.length === 0) {
+            return ['ONE SIZE'];
+        }
+        return Array.from(
+            new Set(
+                upper.map((s) => (s.includes('ONE') && s.includes('SIZE') ? 'ONE SIZE' : s.replace(/\s+/g, ' ').trim())),
+            ),
+        );
+    }
+
+    // Clothing sizes
+    const sizeMap: Record<string, string> = {
+        'X-SMALL': 'XS',
+        XS: 'XS',
+        'EXTRA SMALL': 'XS',
+        SMALL: 'S',
+        S: 'S',
+        MEDIUM: 'M',
+        M: 'M',
+        LARGE: 'L',
+        L: 'L',
+        'X-LARGE': 'XL',
+        XL: 'XL',
+        'XX-LARGE': 'XXL',
+        XXL: 'XXL',
+        'XXX-LARGE': 'XXXL',
+        XXXL: 'XXXL',
+    };
+
+    const normalized = upper.map((s) => sizeMap[s] || s);
+    return Array.from(new Set(normalized));
+};
+
+/**
  * Calls Pinkyne/Gemini LLM to enrich a single product.
  * Uses axios to send the raw product JSON and returns a cleaned, enriched product.
  */
@@ -145,7 +224,9 @@ You must read the product details and aboutThisItem to fill the other fields; re
   "image_url": "first image URL from the list",
   "category_main": "one of: outerwear, top, bottom, dress, shoes, accessory, set",
   "category_sub": "specific subcategory in snake_case (e.g., long_hooded_jacket, pencil_skirt)",
-  "category_folder": "hanging",
+  "category_occasion": "one of: casual, hanging, office, party",
+  "category_type": "one of: top, bottom, dress, outerwear, shoes, bag, accessory, set",
+  "category_folder": "same as category_occasion (legacy field)",
   "gender": "womens",
   "age_group": "adult",
   "description": "short but rich marketing description based on aboutThisItem (max 30-40 words)",
@@ -158,7 +239,7 @@ You must read the product details and aboutThisItem to fill the other fields; re
   "season": ["array of applicable seasons: spring, summer, fall, winter"],
   "style_tags": ["array of style descriptors like office, chic, streetwear, casual, elegant"],
   "occasion_tags": ["array of occasions like work, party, daily, formal, casual, date"],
-  "sizes": ["array of available sizes if mentioned"],
+  "sizes": ["array of available sizes after normalization"],
   "price": number,
   "currency": "usd",
   "is_set": boolean,
@@ -166,17 +247,32 @@ You must read the product details and aboutThisItem to fill the other fields; re
   "aboutThisItem": ["bullet1", "bullet2", "..."]
 }
 
+Classification rules for category_type:
+- top: shirts, blouses, blazers, t-shirts, sweaters.
+- bottom: pants, skirts, shorts, jeans.
+- dress: full body items, gowns, bodycon dress, maxi dress.
+- outerwear: coats, jackets, cardigans, trench coats.
+- shoes: heels, sneakers, boots, sandals, pumps, loafers.
+- bag: handbags, clutches, totes, crossbody bags, backpacks.
+- accessory: jewelry, scarves, belts, hats, hair accessories.
+- set: two-piece or multi-piece coordinated outfits.
+
+Size normalization:
+- For clothing (top, bottom, dress, outerwear, set): normalize to size codes like ["XS","S","M","L","XL","XXL","XXXL"].
+- For shoes: output only numeric strings like ["36","37","38","39","40"].
+- For bags and accessories: use ["One Size"] when appropriate.
+
 Rules:
 - Fix typos and normalize material/color names.
 - Use aboutThisItem bullets to build a concise description (max 30-40 words, no fluff).
-- Choose EXACTLY ONE of [ office,party, casual, hanging] for category_folder.
+- Choose EXACTLY ONE of [office, party, casual, hanging] for category_occasion (and mirror it to category_folder).
 - Return ONLY raw JSON, no markdown, no explanation.
 `;
 
     const prompt = `
-You are an AI Data Cleaner. I will give you a raw product JSON from Amazon.
+You are an AI Fashion Product Data Cleaner. I will give you a raw product JSON from Amazon.
 Please correct typos, standardise fields (material, color), generate a short description based on "aboutThisItem",
-and classify it into one of: [ "office", "party", "casual", "hanging"].
+and classify it by occasion AND item type using the schema above.
 
 ${schemaDescription}
 
@@ -195,12 +291,13 @@ ${JSON.stringify(rawProduct, null, 2)}
                         content:
                             'You are an AI Data Cleaner for fashion products. ' +
                             'Always return ONLY valid JSON, no extra explanation. ' +
-                            'Keep the generated description concise (max 30-40 words).',
+                            'Keep the generated description concise (max 30-40 words). ' +
+                            'Strictly follow the classification and size normalization rules in the schema.',
                     },
                     { role: 'user', content: prompt },
                 ],
                 temperature: 0.2,
-                max_tokens: 2000,
+                max_tokens: 5000,
                 stream: false,
             },
             {
@@ -250,18 +347,54 @@ ${JSON.stringify(rawProduct, null, 2)}
             parsed.category_sub = parsed.category_sub || inferred.category_sub;
         }
 
-        const validFolders = ['casual', 'office', 'party', 'hanging'] as const;
-        if (!parsed.category_folder || !validFolders.includes(parsed.category_folder)) {
-            // Simple fallback: default to casual
-            parsed.category_folder = 'casual';
+        const validOccasions: CategoryOccasion[] = ['casual', 'office', 'party', 'hanging'];
+        const validTypes: CategoryType[] = ['top', 'bottom', 'dress', 'outerwear', 'shoes', 'bag', 'accessory', 'set'];
+
+        // Normalize occasion fields
+        let occasion: CategoryOccasion =
+            parsed.category_occasion && validOccasions.includes(parsed.category_occasion)
+                ? parsed.category_occasion
+                : parsed.category_folder && validOccasions.includes(parsed.category_folder)
+                  ? parsed.category_folder
+                  : 'casual';
+
+        parsed.category_occasion = occasion;
+        parsed.category_folder = occasion; // keep legacy in sync
+
+        // Normalize type field
+        let typeFromModel: CategoryType | null =
+            parsed.category_type && validTypes.includes(parsed.category_type) ? parsed.category_type : null;
+
+        if (!typeFromModel) {
+            // Derive from category_main or inferred category
+            const inferred = inferCategory(rawProduct.title);
+            const mapping: Record<string, CategoryType> = {
+                outerwear: 'outerwear',
+                top: 'top',
+                bottom: 'bottom',
+                dress: 'dress',
+                shoes: 'shoes',
+                accessory: 'accessory',
+                set: 'set',
+            };
+            const fromMain =
+                parsed.category_main && mapping[parsed.category_main]
+                    ? mapping[parsed.category_main]
+                    : mapping[inferred.category_main];
+            typeFromModel = fromMain || 'top';
         }
+
+        parsed.category_type = typeFromModel;
 
         // Ensure arrays
         parsed.material = Array.isArray(parsed.material) ? parsed.material : [];
         parsed.season = Array.isArray(parsed.season) ? parsed.season : [];
         parsed.style_tags = Array.isArray(parsed.style_tags) ? parsed.style_tags : [];
         parsed.occasion_tags = Array.isArray(parsed.occasion_tags) ? parsed.occasion_tags : [];
-        parsed.sizes = Array.isArray(parsed.sizes) ? parsed.sizes : [];
+
+        // Normalize sizes using category_type (falling back to raw scraped sizes if needed)
+        const rawSizesForNormalization = parsed.sizes && parsed.sizes.length > 0 ? parsed.sizes : rawProduct.sizes;
+        parsed.sizes = normalizeSizes(parsed.category_type, rawSizesForNormalization);
 
         // Ensure numeric fields
         parsed.price = typeof parsed.price === 'number' ? parsed.price : rawProduct.price;
@@ -277,7 +410,8 @@ ${JSON.stringify(rawProduct, null, 2)}
         log.info('Product data enriched (LLM)', {
             id: enriched.id,
             category: enriched.category_main,
-            category_folder: enriched.category_folder,
+            category_occasion: enriched.category_occasion,
+            category_type: enriched.category_type,
             brand: enriched.brand,
         });
 
