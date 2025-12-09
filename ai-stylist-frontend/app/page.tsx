@@ -19,14 +19,19 @@ type Product = {
   category_folder?: 'casual' | 'hanging' | 'office' | 'party';
 };
 
+type ProductGroup = {
+  key: string;
+  title: string;
+  items: Product[];
+};
+
 export default function Home() {
   const [userFile, setUserFile] = useState<File | null>(null);
   const [userPreview, setUserPreview] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("Minimalist office look for tomorrow's board meeting.");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [outfits, setOutfits] = useState<Product[]>([]);
-  const [showWardrobe, setShowWardrobe] = useState(false);
-  const [currentPage, setCurrentPage] = useState(0);
+  const [groups, setGroups] = useState<ProductGroup[]>([]);
+  const [groupPages, setGroupPages] = useState<Record<string, number>>({});
   const [modalOpen, setModalOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [resultImage, setResultImage] = useState<string | undefined>(undefined);
@@ -40,13 +45,19 @@ export default function Home() {
       console.log('Calling suggestOutfits with prompt:', prompt);
       const data = await suggestOutfits(prompt);
       console.log('Received data from backend:', data);
-      // Backend /api/suggest trả về dạng { items, category, message }
-      const list: Product[] = data?.items ?? data?.products ?? [];
-      console.log('Extracted items:', list.length);
-      setOutfits(list);
-      setShowWardrobe(list.length > 0);
-      setCurrentPage(0);
-      if (list.length === 0) {
+      const apiGroups: ProductGroup[] = data?.groups ?? [];
+      const fallbackItems: Product[] = data?.items ?? data?.products ?? [];
+      const resolvedGroups: ProductGroup[] =
+        apiGroups.length > 0
+          ? apiGroups
+          : fallbackItems.length > 0
+            ? [{ key: 'all', title: 'All', items: fallbackItems }]
+            : [];
+
+      setGroups(resolvedGroups);
+      setGroupPages(Object.fromEntries(resolvedGroups.map((g) => [g.key, 0])));
+
+      if (resolvedGroups.length === 0) {
         alert('No products found. Please try a different prompt or check if the backend server is running.');
       }
     } catch (error: any) {
@@ -58,10 +69,9 @@ export default function Home() {
     }
   };
 
-  const totalPages = useMemo(() => Math.max(1, Math.ceil(outfits.length / ITEMS_PER_PAGE)), [outfits.length]);
-  const visibleProducts = useMemo(
-    () => outfits.slice(currentPage * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE + ITEMS_PER_PAGE),
-    [outfits, currentPage]
+  const hasProducts = useMemo(
+    () => groups.some((group) => group.items.length > 0),
+    [groups]
   );
 
   const handleProductSelect = async (product: Product) => {
@@ -96,13 +106,25 @@ export default function Home() {
     }
     try {
       await deleteProductApi(product.category_folder, product.id);
-      setOutfits((prev) => {
-        const next = prev.filter((item) => item.id !== product.id);
-        const newTotalPages = Math.max(1, Math.ceil(next.length / ITEMS_PER_PAGE));
-        setCurrentPage((prevPage) =>
-          prevPage >= newTotalPages ? Math.max(0, newTotalPages - 1) : prevPage
-        );
-        return next;
+      setGroups((prev) => {
+        const updated = prev.map((group) => {
+          const filtered = group.items.filter((item) => item.id !== product.id);
+          return filtered.length !== group.items.length ? { ...group, items: filtered } : group;
+        });
+
+        setGroupPages((prevPages) => {
+          const nextPages = { ...prevPages };
+          updated.forEach((group) => {
+            const totalPages = Math.max(1, Math.ceil(group.items.length / ITEMS_PER_PAGE));
+            const current = nextPages[group.key] ?? 0;
+            if (current >= totalPages) {
+              nextPages[group.key] = Math.max(0, totalPages - 1);
+            }
+          });
+          return nextPages;
+        });
+
+        return updated;
       });
     } catch (error) {
       console.error('Failed to delete product', error);
@@ -143,51 +165,79 @@ export default function Home() {
           </button>
         </section>
 
-        {showWardrobe && outfits.length > 0 && (
+        {hasProducts && (
           <section className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm uppercase tracking-[0.4em] text-white/50">Wardrobe</p>
-                <h2 className="text-2xl font-semibold text-white">Curated Picks</h2>
-              </div>
-        </div>
+            <div>
+              <p className="text-sm uppercase tracking-[0.4em] text-white/50">Wardrobe</p>
+              <h2 className="text-2xl font-semibold text-white">Curated Picks by Category</h2>
+            </div>
 
-            <div className="relative flex items-center">
-              <button
-                onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
-                disabled={currentPage === 0}
-                className="absolute -left-16 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20 disabled:opacity-30"
-              >
-                <ChevronLeft className="h-5 w-5" />
-              </button>
-              <motion.div
-                key={currentPage}
-                initial={{ opacity: 0, x: currentPage > 0 ? 50 : -50 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.3 }}
-                className="grid w-full gap-6 pb-4 md:grid-cols-5"
-              >
-                {visibleProducts.map((product: Product) => (
-                  <ProductCard
-                    key={product.id}
-                    product={product}
-                    onSelect={handleProductSelect}
-                    onDelete={() => handleDelete(product)}
-            />
-                ))}
-              </motion.div>
-              <button
-                onClick={() => setCurrentPage((p) => Math.min(totalPages - 1, p + 1))}
-                disabled={currentPage >= totalPages - 1}
-                className="absolute -right-16 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20 disabled:opacity-30"
-              >
-                <ChevronRight className="h-5 w-5" />
-              </button>
-        </div>
+            <div className="space-y-10">
+              {groups.map((group) => {
+                const current = groupPages[group.key] ?? 0;
+                const totalPages = Math.max(1, Math.ceil(group.items.length / ITEMS_PER_PAGE));
+                const visibleProducts = group.items.slice(
+                  current * ITEMS_PER_PAGE,
+                  current * ITEMS_PER_PAGE + ITEMS_PER_PAGE
+                );
 
-            <p className="text-center text-sm text-white/70">
-              Page {Math.min(currentPage + 1, totalPages)} of {totalPages}
-            </p>
+                return (
+                  <div key={group.key} className="space-y-3 rounded-3xl border border-white/5 bg-white/5 p-6 shadow-2xl shadow-purple-500/10">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xl font-semibold text-white">{group.title}</h3>
+                      <div className="flex items-center gap-2 text-sm text-white/70">
+                        Page {Math.min(current + 1, totalPages)} of {totalPages}
+                      </div>
+                    </div>
+
+                    <div className="relative flex items-center">
+                      <button
+                        onClick={() =>
+                          setGroupPages((prev) => ({
+                            ...prev,
+                            [group.key]: Math.max(0, (prev[group.key] ?? 0) - 1),
+                          }))
+                        }
+                        disabled={current === 0}
+                        className="absolute -left-14 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20 disabled:opacity-30"
+                      >
+                        <ChevronLeft className="h-5 w-5" />
+                      </button>
+
+                      <motion.div
+                        key={`${group.key}-${current}`}
+                        initial={{ opacity: 0, x: current > 0 ? 50 : -50 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ duration: 0.3 }}
+                        className="grid w-full gap-6 pb-4 md:grid-cols-5"
+                      >
+                        {visibleProducts.map((product: Product) => (
+                          <ProductCard
+                            key={product.id}
+                            product={product}
+                            onSelect={handleProductSelect}
+                            onDelete={() => handleDelete(product)}
+                          />
+                        ))}
+                      </motion.div>
+
+                      <button
+                        onClick={() =>
+                          setGroupPages((prev) => ({
+                            ...prev,
+                            [group.key]: Math.min(totalPages - 1, (prev[group.key] ?? 0) + 1),
+                          }))
+                        }
+                        disabled={current >= totalPages - 1}
+                        className="absolute -right-14 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20 disabled:opacity-30"
+                      >
+                        <ChevronRight className="h-5 w-5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </section>
         )}
       </main>

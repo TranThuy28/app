@@ -5,8 +5,15 @@ import type { EnrichedProduct } from './enricher.ts';
 /**
  * Result interface for outfit suggestions
  */
+export interface ProductGroup {
+    key: string;
+    title: string;
+    items: EnrichedProduct[];
+}
+
 export interface OutfitResult {
     items: EnrichedProduct[];
+    groups: ProductGroup[];
     category: 'casual' | 'hanging' | 'office' | 'party';
     message: string;
 }
@@ -52,27 +59,64 @@ export class SimpleStylist {
     }
 
     /**
-     * Loads all products for a category from its JSON file.
+     * Loads all JSON files inside a category folder and returns them as groups.
+     * Falls back to the legacy single-file structure if no folder is found.
      */
-    private loadCategory(category: 'casual' | 'hanging' | 'office' | 'party'): EnrichedProduct[] {
-        const filePath = path.join(this.productsBasePath, `${category}.json`);
+    private loadCategoryGroups(category: 'casual' | 'hanging' | 'office' | 'party'): ProductGroup[] {
+        const folderPath = path.join(this.productsBasePath, category);
+        const legacyFilePath = path.join(this.productsBasePath, `${category}.json`);
 
-        if (!fs.existsSync(filePath)) {
-            return [];
-        }
+        const groups: ProductGroup[] = [];
 
-        try {
-            const raw = fs.readFileSync(filePath, 'utf-8');
-            const data = JSON.parse(raw);
-            if (Array.isArray(data)) {
-                return data as EnrichedProduct[];
+        const humanize = (key: string) => {
+            return key
+                .replace(/[-_]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .replace(/\b\w/g, (c) => c.toUpperCase());
+        };
+
+        if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
+            const files = fs.readdirSync(folderPath).filter((f) => f.endsWith('.json'));
+            for (const file of files) {
+                const filePath = path.join(folderPath, file);
+                try {
+                    const raw = fs.readFileSync(filePath, 'utf-8');
+                    const data = JSON.parse(raw);
+                    if (Array.isArray(data)) {
+                        const key = path.parse(file).name;
+                        groups.push({
+                            key,
+                            title: humanize(key),
+                            items: data as EnrichedProduct[],
+                        });
+                    } else {
+                        console.warn(`Category file ${filePath} does not contain an array, skipping.`);
+                    }
+                } catch (error) {
+                    console.error(`Error reading category file ${filePath}:`, error);
+                }
             }
-            console.warn(`Category file ${filePath} does not contain an array.`);
-            return [];
-        } catch (error) {
-            console.error(`Error reading category file ${filePath}:`, error);
-            return [];
         }
+
+        // Legacy fallback: single JSON file per category
+        if (groups.length === 0 && fs.existsSync(legacyFilePath)) {
+            try {
+                const raw = fs.readFileSync(legacyFilePath, 'utf-8');
+                const data = JSON.parse(raw);
+                if (Array.isArray(data)) {
+                    groups.push({
+                        key: 'all',
+                        title: 'All',
+                        items: data as EnrichedProduct[],
+                    });
+                }
+            } catch (error) {
+                console.error(`Error reading legacy category file ${legacyFilePath}:`, error);
+            }
+        }
+
+        return groups;
     }
 
     /**
@@ -94,23 +138,24 @@ export class SimpleStylist {
         // Step 1: Map message to category
         const category = this.mapMessageToCategory(userMessage);
 
-        // Step 2: Load the entire category JSON
-        const products = this.loadCategory(category);
+        // Step 2: Load all json files inside the mapped category folder
+        const groups = this.loadCategoryGroups(category);
+        const flattened = this.shuffle(groups.flatMap((g) => g.items));
 
-        if (products.length === 0) {
+        if (flattened.length === 0) {
             return {
                 items: [],
+                groups: [],
                 category,
                 message: `No products found in category ${category}`,
             };
         }
 
-        const shuffled = this.shuffle(products);
-
         return {
-            items: shuffled,
+            items: flattened,
+            groups,
             category,
-            message: `Found ${products.length} item(s) for ${category}`,
+            message: `Found ${flattened.length} item(s) across ${groups.length} group(s) for ${category}`,
         };
     }
 
@@ -118,34 +163,48 @@ export class SimpleStylist {
      * Gets all available products in a category (for debugging/testing)
      */
     getAllProductsInCategory(category: 'casual' | 'hanging' | 'office' | 'party'): EnrichedProduct[] {
-        return this.loadCategory(category);
+        return this.loadCategoryGroups(category).flatMap((g) => g.items);
     }
 
     /**
      * Deletes a product by id from a specific category file.
      */
     deleteProduct(category: 'casual' | 'hanging' | 'office' | 'party', productId: string): boolean {
-        const filePath = path.join(this.productsBasePath, `${category}.json`);
+        const folderPath = path.join(this.productsBasePath, category);
+        const legacyFilePath = path.join(this.productsBasePath, `${category}.json`);
+        let deleted = false;
 
-        if (!fs.existsSync(filePath)) {
-            return false;
-        }
-
-        try {
-            const raw = fs.readFileSync(filePath, 'utf-8');
-            const data = JSON.parse(raw) as EnrichedProduct[];
-            const filtered = data.filter((item) => item.id !== productId);
-
-            if (filtered.length === data.length) {
-                return false; // no product removed
+        const tryDeleteInFile = (filePath: string) => {
+            if (!fs.existsSync(filePath)) return false;
+            try {
+                const raw = fs.readFileSync(filePath, 'utf-8');
+                const data = JSON.parse(raw) as EnrichedProduct[];
+                const filtered = data.filter((item) => item.id !== productId);
+                if (filtered.length === data.length) return false;
+                fs.writeFileSync(filePath, JSON.stringify(filtered, null, 2), 'utf-8');
+                return true;
+            } catch (error) {
+                console.error(`Failed to delete product ${productId} from ${filePath}:`, error);
+                return false;
             }
+        };
 
-            fs.writeFileSync(filePath, JSON.stringify(filtered, null, 2), 'utf-8');
-            return true;
-        } catch (error) {
-            console.error(`Failed to delete product ${productId} from ${category}:`, error);
-            return false;
+        if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
+            const files = fs.readdirSync(folderPath).filter((f) => f.endsWith('.json'));
+            for (const file of files) {
+                const filePath = path.join(folderPath, file);
+                if (tryDeleteInFile(filePath)) {
+                    deleted = true;
+                    break;
+                }
+            }
         }
+
+        if (!deleted) {
+            deleted = tryDeleteInFile(legacyFilePath);
+        }
+
+        return deleted;
     }
 }
 
