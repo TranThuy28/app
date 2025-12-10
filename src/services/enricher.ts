@@ -284,7 +284,7 @@ ${JSON.stringify(rawProduct, null, 2)}
         const response = await axios.post(
             `${baseUrl}/chat/completions`,
             {
-                model: 'gpt-4.1-mini', // or any suitable model on Pinkyne
+                model: 'gpt-4o-mini', // or any suitable model on Pinkyne
                 messages: [
                     {
                         role: 'system',

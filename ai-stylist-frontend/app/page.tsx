@@ -33,10 +33,14 @@ export default function Home() {
   const [modalOpen, setModalOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [resultImage, setResultImage] = useState<string | undefined>(undefined);
+  const [resultType, setResultType] = useState<'vton' | 'composite' | undefined>(undefined);
+  const [resultWarning, setResultWarning] = useState<string | undefined>(undefined);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
 
   const handleAnalyze = async () => {
     if (!prompt.trim()) return;
+    setOutfits([]); // clear old data immediately
+    setShowWardrobe(false);
     setIsAnalyzing(true);
     try {
       console.log('Calling suggestOutfits with prompt:', prompt);
@@ -68,6 +72,8 @@ export default function Home() {
     setModalOpen(true);
     setIsGenerating(true);
     setResultImage(undefined);
+    setResultType(undefined);
+    setResultWarning(undefined);
     try {
       const response = await generateTryOn(userFile, product);
       const imageUrl =
@@ -77,6 +83,8 @@ export default function Home() {
         response?.data ||
         null;
       setResultImage(imageUrl ?? undefined);
+      setResultType(response?.type ?? 'vton');
+      setResultWarning(response?.warning);
     } catch (error) {
       console.error("Failed to generate try-on", error);
     } finally {
@@ -118,6 +126,8 @@ export default function Home() {
       setModalOpen(true);
       setIsGenerating(true);
       setResultImage(undefined);
+      setResultType(undefined);
+      setResultWarning(undefined);
 
       try {
         const response = await generateOutfitTryOn(userImageBase64, productUrls);
@@ -128,6 +138,13 @@ export default function Home() {
           response?.data ||
           null;
         setResultImage(imageUrl ?? undefined);
+        setResultType(response?.type ?? 'vton');
+        setResultWarning(response?.warning);
+        if (response?.success === false) {
+          alert(response?.error || 'Failed to generate outfit try-on. Please try again.');
+        } else if (!imageUrl) {
+          alert('No image returned. Please try again.');
+        }
       } catch (error) {
         console.error("Failed to generate outfit try-on", error);
         alert("Failed to generate outfit try-on. Please try again.");
@@ -178,7 +195,7 @@ export default function Home() {
           </button>
         </section>
 
-        {showWardrobe && outfits.length > 0 && (
+        {!isAnalyzing && showWardrobe && outfits.length > 0 && (
           <section className="space-y-8">
             <div>
               <p className="text-sm uppercase tracking-[0.4em] text-white/50">Wardrobe</p>
@@ -205,6 +222,8 @@ export default function Home() {
         loading={isGenerating}
         userImage={userPreview ?? undefined}
         resultImage={resultImage}
+        resultType={resultType}
+        resultWarning={resultWarning}
         productTitle={selectedProduct?.title}
         productUrl={selectedProduct?.product_url}
         aboutThisItem={selectedProduct?.aboutThisItem}

@@ -123,8 +123,8 @@ export class VtonService {
     }
 
     /**
-     * Creates a composite image from multiple product image URLs.
-     * Arranges them in a smart grid layout that preserves aspect ratios.
+     * Creates a simple outfit board (collage) from multiple product image URLs.
+     * Uses safe boxing to ensure all images fit within fixed-size cells without overflow.
      */
     private async createOutfitComposite(imageUrls: string[]): Promise<Buffer> {
         if (imageUrls.length === 0) {
@@ -136,7 +136,7 @@ export class VtonService {
             imageUrls.map(url => this.downloadImage(url))
         );
 
-        // Determine grid layout based on item count
+        // Determine grid layout
         const itemCount = Math.min(imageUrls.length, 6); // Max 6 items
         let rows: number;
         let cols: number;
@@ -146,40 +146,37 @@ export class VtonService {
             cols = 1;
         } else if (itemCount === 2) {
             rows = 1;
-            cols = 2; // Side-by-side
+            cols = 2;
         } else if (itemCount <= 4) {
             rows = 2;
             cols = 2; // 2x2 grid
         } else {
-            // 5-6 items: 2 rows, 3 columns
             rows = 2;
-            cols = 3;
+            cols = 3; // 2x3 grid for 5-6 items
         }
 
-        // Fixed canvas size (800x800 square)
-        const canvasWidth = 800;
-        const canvasHeight = 800;
+        // Safe boxing: fixed box size ensures no overflow
+        const boxSize = 512;
+        const padding = 20;
+        const cellWidth = boxSize + padding * 2;
+        const cellHeight = boxSize + padding * 2;
 
-        // Calculate cell dimensions
-        const cellWidth = canvasWidth / cols;
-        const cellHeight = canvasHeight / rows;
-
-        // Process each image to fit within its cell while preserving aspect ratio
+        // Process each image: resize to fit within square box (safe boxing)
         const processedImages = await Promise.all(
             imageBuffers.slice(0, itemCount).map(async (buffer, index) => {
-                // Resize image to fit within cell dimensions, preserving aspect ratio
+                // Resize to fit within square box - ensures image never exceeds boxSize x boxSize
                 const resizedBuffer = await sharp(buffer)
-                    .resize(cellWidth, cellHeight, {
-                        fit: 'contain',
-                        background: { r: 255, g: 255, b: 255, alpha: 1 },
+                    .resize(boxSize, boxSize, {
+                        fit: 'contain', // Ensures image fits inside box without cropping
+                        background: { r: 255, g: 255, b: 255, alpha: 1 }, // Fills empty space with white
                     })
                     .toBuffer();
 
-                // Calculate position in grid
+                // Calculate position in grid (centered within cell)
                 const row = Math.floor(index / cols);
                 const col = index % cols;
-                const top = row * cellHeight;
-                const left = col * cellWidth;
+                const top = row * cellHeight + padding;
+                const left = col * cellWidth + padding;
 
                 return {
                     input: resizedBuffer,
@@ -189,7 +186,10 @@ export class VtonService {
             })
         );
 
-        // Create composite canvas
+        // Create canvas with white background
+        const canvasWidth = cols * cellWidth;
+        const canvasHeight = rows * cellHeight;
+
         const composite = sharp({
             create: {
                 width: canvasWidth,
@@ -200,86 +200,83 @@ export class VtonService {
         });
 
         // Composite all images onto the canvas
-        const finalBuffer = await composite.composite(processedImages).jpeg().toBuffer();
+        const finalBuffer = await composite
+            .composite(processedImages)
+            .jpeg({ quality: 85 })
+            .toBuffer();
+
         return finalBuffer;
     }
 
     /**
      * Generates a virtual try-on image using a user image (base64) and multiple product image URLs.
-     * Creates a composite of all product images and sends to VTON API.
+     * Creates an outfit board (collage) and sends to Gemini 2.5 Flash for generation.
      *
      * @param userImageBase64 - Base64-encoded user image
      * @param productUrls - Array of product image URLs to composite
      * @returns Base64-encoded result image
      */
-    async generateVton(userImageBase64: string, productUrls: string[]): Promise<string> {
-        // Step 1: Create composite outfit image
-        console.log(`🎨 Creating outfit composite from ${productUrls.length} product images...`);
-        const outfitCompositeBuffer = await this.createOutfitComposite(productUrls);
-        const garmentBase64 = outfitCompositeBuffer.toString('base64');
+    async generateVton(
+        userImageBase64: string,
+        productUrls: string[],
+    ): Promise<{ success: boolean; image?: string; type?: 'vton' | 'composite'; warning?: string; error?: string }> {
+        // Step A: Create outfit board (collage)
+        console.log(`🎨 Creating outfit board from ${productUrls.length} product images...`);
+        const outfitBoardBuffer = await this.createOutfitComposite(productUrls);
+        const outfitBoardBase64 = outfitBoardBuffer.toString('base64');
 
-        // Step 2: Construct the strict identity-preserving prompt
-        const systemPrompt = `
+        // Step B: Construct simple multimodal prompt for Gemini 2.5 Flash
+        const prompt = `You are an expert AI fashion photographer and virtual stylist, specializing in hyper-realistic virtual try-on technology.
 
-TASK: Photorealistic Virtual Try-On / Image Editing.
+INPUTS:
+- Image 1 (Reference User): Provides the target person's face, hair, exact body pose, and the background environment.
+- Image 2 (Outfit Flat-Lay): Provides the complete set of clothing and accessories that must be worn.
 
-BASE IMAGE: The user provided in the first image.
+PRIMARY TASK:
+Generate a photorealistic, full-body photograph of the specific person from Image 1, now wearing EVERY single item depicted in the outfit flat-lay of Image 2.
 
-REFERENCE CLOTHING: The composite outfit provided in the second image.
+STRICT CONSTRAINTS & EXECUTION GUIDELINES:
 
+1.  **IDENTITY & POSE LOCK (CRITICAL):**
+    * The face, facial features, hair style, hair color, skin tone, and body proportions MUST be identical to Image 1. Do not swap faces or alter the person's identity.
+    * The exact body pose from Image 1 MUST be maintained. The new clothes must conform to this specific pose.
 
+2.  **COMPLETE OUTFIT TRANSFER:**
+    * **Mandatory Inclusion:** Every item visible in Image 2 (top, bottom, shoes, bag, hats, accessories) MUST be present in the final image. No missing items.
+    * **Realistic Replacement:** The user's original clothes in Image 1 must be completely removed and replaced by the items in Image 2.
 
-INSTRUCTIONS:
+3.  **REALISTIC DRAPE & TEXTURE:**
+    * Clothes must NOT look like flat stickers. They must drape realistically over the user's body shape, showing realistic fabric folds, wrinkles, tension based on the pose, and accurate material textures (e.g., denim looks like denim, silk looks silky).
+    * Lighting on the new clothes must match the lighting in the original background of Image 1.
 
-1.  **Strict Identity Preservation:** You MUST preserve the user's face, hair, head shape, skin tone, and body pose EXACTLY as they appear in the Base Image. Do NOT generate a new face. Do NOT apply heavy beautification filters that alter features.
+4.  **ITEM PLACEMENT & COMPOSITION:**
+    * **Full-Body Shot:** The final image must be a full-body view to ensure shoes are clearly visible on the feet.
+    * **Bags & Accessories:** Bags must be held naturally in the hand or slung over the shoulder, consistent with the pose in Image 1. Never have items floating near the body.
+    * **Layering:** If Image 2 contains layers (e.g., a jacket over a shirt), they must be layered correctly on the user.
 
-2.  **Target Action:** Only replace the user's current clothing with the items visible in the Reference Clothing image.
+5.  **ENVIRONMENT INTEGRATION:**
+    * Keep the background and environmental lighting exactly the same as Image 1 to ensure the result looks like a single, cohesive photograph.
 
-3.  **Outfit Mapping:**
+**NEGATIVE CONSTRAINTS (What to avoid):**
+(distorted face), (changed identity), (missing shoes), (missing bag), (floating clothes), (flat textures), (cartoonish), (blurry items), (original clothes visible underneath).`;
 
-    -   If the reference is a Dress -> Replace the user's top and bottom.
-
-    -   If the reference is Top + Bottom -> Replace accordingly.
-
-    -   If the reference includes a Bag -> Composite the bag naturally over the shoulder or in hand (if pose allows), otherwise place it near the user.
-
-4.  **Background:** Keep the original background of the Base Image as much as possible.
-
-
-
-NEGATIVE PROMPT (What to avoid):
-
-(changing face:1.5), (changing hair:1.3), (new person), (cartoon), (illustration), (floating clothes), (distorted face), (extra limbs), ( mannequins), (flat lay next to person).
-
-
-
-OUTPUT REQUIREMENT:
-
-Return a single photorealistic image of the ORIGINAL USER wearing the NEW OUTFIT.
-
-`;
-
-        // Step 3: Call Pinkyne API
+        // Step C: Call Pinkyne API
         const endpoint = `${this.baseUrl.replace(/\/+$/, '')}/chat/completions`;
 
         const payload = {
             model: 'gemini-2.5-flash-image-preview',
             messages: [
                 {
-                    role: 'system',
-                    content: 'You are a professional virtual try-on AI. Your primary responsibility is to preserve the user\'s identity (face, hair, body shape, pose) EXACTLY as shown in the base image. Only replace clothing items, never alter the person\'s appearance.',
-                },
-                {
                     role: 'user',
                     content: [
-                        { type: 'text', text: systemPrompt } as any,
+                        { type: 'text', text: prompt } as any,
                         {
                             type: 'image_url',
                             image_url: { url: `data:image/jpeg;base64,${userImageBase64}` },
                         } as any,
                         {
                             type: 'image_url',
-                            image_url: { url: `data:image/jpeg;base64,${garmentBase64}` },
+                            image_url: { url: `data:image/jpeg;base64,${outfitBoardBase64}` },
                         } as any,
                     ],
                 },
@@ -288,23 +285,39 @@ Return a single photorealistic image of the ORIGINAL USER wearing the NEW OUTFIT
             max_tokens: 500,
         };
 
-        console.log('🤖 Sending VTON request to Pinkyne API...');
-        const response = await axios.post(endpoint, payload, {
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${this.apiKey}`,
-            },
-        });
+        try {
+            console.log('🤖 Sending VTON request to Pinkyne API...');
+            const response = await axios.post(endpoint, payload, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${this.apiKey}`,
+                },
+                timeout: 60000, // 60 seconds
+            });
 
-        // Step 4: Extract base64 image data from the response
-        const imageBase64 = this.extractBase64FromResponse(response.data);
-        if (!imageBase64) {
-            throw new Error(
-                `Failed to extract base64 image data from VTON response. Raw snippet: ${JSON.stringify(response.data).slice(0, 200)}`
-            );
+            // Extract base64 image data from the response
+            const imageBase64 = this.extractBase64FromResponse(response.data);
+            if (!imageBase64) {
+                throw new Error(
+                    `Failed to extract base64 image data from VTON response. Raw snippet: ${JSON.stringify(response.data).slice(0, 200)}`
+                );
+            }
+            console.log('image gen success');
+
+            return { success: true, image: imageBase64, type: 'vton' };
+        } catch (error) {
+            console.error('❌ VTON failed, returning outfit board fallback...', {
+                error: error instanceof Error ? error.message : String(error),
+            });
+
+            // Return the outfit board as fallback
+            return {
+                success: true,
+                image: outfitBoardBase64,
+                type: 'composite',
+                warning: 'AI busy, showing outfit preview.',
+            };
         }
-
-        return imageBase64;
     }
 
     /**

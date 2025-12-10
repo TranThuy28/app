@@ -2,7 +2,13 @@ import axios from 'axios';
 
 const api = axios.create({
   baseURL: 'http://localhost:4000/api',
-  timeout: 30000, // 30 seconds timeout
+  timeout: 70000, // ~70s for normal calls
+});
+
+// Long-timeout instance for VTON requests (can take several minutes)
+const apiLong = axios.create({
+  baseURL: 'http://localhost:4000/api',
+  timeout: 300000, // 5 minutes
 });
 
 // Add request interceptor for logging
@@ -35,7 +41,10 @@ api.interceptors.response.use(
 );
 
 export const suggestOutfits = async (query: string) => {
-  const { data } = await api.post('/suggest', { message: query });
+  const ts = Date.now();
+  const { data } = await api.post(`/suggest?t=${ts}`, { message: query }, {
+    headers: { 'Cache-Control': 'no-cache' },
+  });
   return data;
 };
 
@@ -45,9 +54,11 @@ export const generateTryOn = async (userImage: File, product: any) => {
   formData.append('query', product?.title || '');
   formData.append('product_image_path', product?.image_url || '');
 
-  const { data } = await api.post('/try-on', formData, {
+  const ts = Date.now();
+  const { data } = await apiLong.post(`/try-on?t=${ts}`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
+      'Cache-Control': 'no-cache',
     },
   });
 
@@ -55,9 +66,12 @@ export const generateTryOn = async (userImage: File, product: any) => {
 };
 
 export const generateOutfitTryOn = async (userImageBase64: string, productUrls: string[]) => {
-  const { data } = await api.post('/try-on-outfit', {
+  const ts = Date.now();
+  const { data } = await apiLong.post(`/try-on-outfit?t=${ts}`, {
     userImage: userImageBase64,
     productUrls: productUrls,
+  }, {
+    headers: { 'Cache-Control': 'no-cache' },
   });
 
   return data;

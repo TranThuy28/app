@@ -7,6 +7,8 @@ type ResultModalProps = {
   loading: boolean;
   resultImage?: string;
   userImage?: string;
+  resultType?: 'vton' | 'composite';
+  resultWarning?: string;
   productTitle?: string;
   productUrl?: string;
   aboutThisItem?: string[];
@@ -18,6 +20,8 @@ export function ResultModal({
   loading,
   resultImage,
   userImage,
+  resultType,
+  resultWarning,
   productTitle,
   productUrl,
   aboutThisItem,
@@ -75,6 +79,15 @@ export function ResultModal({
                     )}
                   </div>
                 </div>
+
+                {resultType === 'composite' && (
+                  <div className="mt-4 inline-flex items-center gap-2 rounded-full bg-amber-500/20 px-4 py-2 text-sm text-amber-200">
+                    ⚠️ AI Try-On failed. Showing Outfit Preview.
+                  </div>
+                )}
+                {resultWarning && resultType === 'composite' && (
+                  <p className="mt-2 text-sm text-amber-200/80">{resultWarning}</p>
+                )}
 
                 {(productTitle || productUrl || (aboutThisItem && aboutThisItem.length > 0)) && (
                   <div className="mt-8 grid gap-6 md:grid-cols-[2fr,3fr]">

@@ -102,6 +102,7 @@ app.post('/api/try-on', upload.single('user_image'), async (req, res) => {
     res.json({
       success: true,
       image_url: `/storage/try-on/${outputFileName}`,
+      type: 'vton',
     });
   } catch (error) {
     console.error('Error in /api/try-on:', error);
@@ -126,17 +127,26 @@ app.post('/api/try-on-outfit', async (req, res) => {
     console.log(`🎬 Starting full outfit try-on with ${productUrls.length} products...`);
 
     // Call the new generateVton method
-    const resultImageBase64 = await vtonService.generateVton(cleanUserImage, productUrls);
+    const result = await vtonService.generateVton(cleanUserImage, productUrls);
+    console.log('result of vton service', result);
+    if (!result.success || !result.image) {
+      return res.status(500).json({
+        success: false,
+        error: result.error || 'Failed to generate outfit try-on image',
+      });
+    }
 
     // Save the result image
     const outputFileName = `tryon-outfit-${Date.now()}.png`;
     const outputPath = path.join(tryOnDir, outputFileName);
-    const outputBuffer = Buffer.from(resultImageBase64, 'base64');
+    const outputBuffer = Buffer.from(result.image, 'base64');
     fs.writeFileSync(outputPath, outputBuffer);
 
     res.json({
       success: true,
       image_url: `/storage/try-on/${outputFileName}`,
+      type: result.type || 'vton',
+      warning: result.warning,
     });
   } catch (error) {
     console.error('Error in /api/try-on-outfit:', error);
