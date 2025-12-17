@@ -113,7 +113,7 @@ app.post('/api/try-on', upload.single('user_image'), async (req, res) => {
 // New endpoint for full outfit try-on
 app.post('/api/try-on-outfit', async (req, res) => {
   try {
-    const { userImage, productUrls } = req.body;
+    const { userImage, productUrls, productDetails } = req.body;
 
     if (!userImage || !productUrls || !Array.isArray(productUrls) || productUrls.length === 0) {
       return res.status(400).json({
@@ -124,10 +124,22 @@ app.post('/api/try-on-outfit', async (req, res) => {
     // Remove data URL prefix if present
     const cleanUserImage = userImage.replace(/^data:image\/[^;]+;base64,/, '');
 
+    // Load user profile to supply body measurements to VTON
+    let userProfile: any = {};
+    try {
+      const profilePath = path.join(storageRoot, 'user_profile.json');
+      if (fs.existsSync(profilePath)) {
+        const rawProfile = fs.readFileSync(profilePath, 'utf-8');
+        userProfile = JSON.parse(rawProfile);
+      }
+    } catch (err) {
+      console.warn('Could not load user_profile.json; proceeding without profile.', err);
+    }
+
     console.log(`🎬 Starting full outfit try-on with ${productUrls.length} products...`);
 
-    // Call the new generateVton method
-    const result = await vtonService.generateVton(cleanUserImage, productUrls);
+    // Call the new generateVton method with user profile
+    const result = await vtonService.generateVton(cleanUserImage, productUrls, userProfile, productDetails || []);
     console.log('result of vton service', result);
     if (!result.success || !result.image) {
       return res.status(500).json({

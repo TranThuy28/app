@@ -22,7 +22,7 @@ type RawProductForEnrichment = ProductDetails & { product_url?: string };
 
 /**
  * Append enriched products to hierarchical master JSON files.
- * Each occasion + type pair has its own file: storage/products/{category_occasion}/{category_type}.json
+ * Each occasion + type pair has its own file: storage/products/{category_folder}/{category_type}.json
  * Example: storage/products/office/top.json
  */
 const appendEnrichedToCategoryFiles = async (products: EnrichedProduct[]): Promise<void> => {
@@ -31,15 +31,14 @@ const appendEnrichedToCategoryFiles = async (products: EnrichedProduct[]): Promi
     const grouped: Record<string, EnrichedProduct[]> = {};
 
     for (const p of products) {
-        // Fallbacks in case older records don't have new fields
-        const occasion: CategoryOccasion = p.category_occasion || p.category_folder || 'casual';
-        const type: CategoryType = p.category_type || (p.category_main as CategoryType) || 'top';
+        // Use category_folder for storage organization
+        const occasion: CategoryOccasion = p.category_folder || 'casual';
+        const type: CategoryType = p.category_type || 'top';
 
         const key = `${occasion}/${type}`;
         if (!grouped[key]) grouped[key] = [];
         grouped[key].push({
             ...p,
-            category_occasion: occasion,
             category_folder: occasion,
             category_type: type,
         });

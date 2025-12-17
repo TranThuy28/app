@@ -15,20 +15,11 @@ export interface EnrichedProduct {
     product_url: string;
     image_url: string; // The high-res local path or URL
     /**
-     * High-level garment type (kept for backward compatibility)
-     */
-    category_main: Exclude<CategoryType, 'bag'> | 'accessory';
-    category_sub: string; // e.g., "long_hooded_jacket", "pencil_skirt"
-    /**
-     * Occasion (primary dimension)
-     */
-    category_occasion: CategoryOccasion;
-    /**
-     * Item type (secondary dimension, used for hierarchical storage)
+     * Primary item type classification
      */
     category_type: CategoryType;
     /**
-     * Legacy occasion field (kept for compatibility, mirrors category_occasion)
+     * Storage folder based on occasion/style (used for file organization)
      */
     category_folder: CategoryOccasion;
     gender: 'womens';
@@ -113,31 +104,37 @@ const extractBrand = (title: string): string => {
 };
 
 /**
- * Infers category_main and category_sub from title
+ * Infers category_type from title
  */
-const inferCategory = (title: string): { category_main: EnrichedProduct['category_main']; category_sub: string } => {
+const inferCategoryType = (title: string): CategoryType => {
     const lowerTitle = title.toLowerCase();
 
     if (lowerTitle.includes('dress')) {
-        return { category_main: 'dress', category_sub: 'dress' };
+        return 'dress';
     }
     if (lowerTitle.includes('jacket') || lowerTitle.includes('blazer') || lowerTitle.includes('coat')) {
-        return { category_main: 'outerwear', category_sub: 'jacket' };
+        return 'outerwear';
     }
     if (lowerTitle.includes('shirt') || lowerTitle.includes('blouse') || lowerTitle.includes('top') || lowerTitle.includes('tee')) {
-        return { category_main: 'top', category_sub: 'top' };
+        return 'top';
     }
     if (lowerTitle.includes('pants') || lowerTitle.includes('trousers') || lowerTitle.includes('skirt')) {
-        return { category_main: 'bottom', category_sub: lowerTitle.includes('skirt') ? 'skirt' : 'pants' };
+        return 'bottom';
     }
     if (lowerTitle.includes('shoes') || lowerTitle.includes('heels') || lowerTitle.includes('pumps') || lowerTitle.includes('sneakers')) {
-        return { category_main: 'shoes', category_sub: 'shoes' };
+        return 'shoes';
+    }
+    if (lowerTitle.includes('bag') || lowerTitle.includes('handbag') || lowerTitle.includes('purse') || lowerTitle.includes('clutch')) {
+        return 'bag';
     }
     if (lowerTitle.includes('set') || lowerTitle.includes('2-piece') || lowerTitle.includes('outfit')) {
-        return { category_main: 'set', category_sub: 'set' };
+        return 'set';
+    }
+    if (lowerTitle.includes('jewelry') || lowerTitle.includes('scarf') || lowerTitle.includes('belt') || lowerTitle.includes('hat')) {
+        return 'accessory';
     }
 
-    return { category_main: 'top', category_sub: 'unknown' };
+    return 'top'; // Default fallback
 };
 
 /**
@@ -222,11 +219,8 @@ You must read the product details and aboutThisItem to fill the other fields; re
   "brand": "brand name",
   "product_url": "original Amazon URL if available",
   "image_url": "first image URL from the list",
-  "category_main": "one of: outerwear, top, bottom, dress, shoes, accessory, set",
-  "category_sub": "specific subcategory in snake_case (e.g., long_hooded_jacket, pencil_skirt)",
-  "category_occasion": "one of: casual, hanging, office, party",
   "category_type": "one of: top, bottom, dress, outerwear, shoes, bag, accessory, set",
-  "category_folder": "same as category_occasion (legacy field)",
+  "category_folder": "one of: casual, hanging, office, party (inferred from style_tags/occasion_tags)",
   "gender": "womens",
   "age_group": "adult",
   "description": "short but rich marketing description based on aboutThisItem (max 30-40 words)",
@@ -247,7 +241,7 @@ You must read the product details and aboutThisItem to fill the other fields; re
   "aboutThisItem": ["bullet1", "bullet2", "..."]
 }
 
-Classification rules for category_type:
+Classification rules for category_type (PRIMARY CLASSIFICATION):
 - top: shirts, blouses, blazers, t-shirts, sweaters.
 - bottom: pants, skirts, shorts, jeans.
 - dress: full body items, gowns, bodycon dress, maxi dress.
@@ -257,6 +251,13 @@ Classification rules for category_type:
 - accessory: jewelry, scarves, belts, hats, hair accessories.
 - set: two-piece or multi-piece coordinated outfits.
 
+Category folder inference (for storage organization):
+- Infer category_folder from style_tags and occasion_tags:
+  - If tags contain "office", "work", "business", "professional" -> "office"
+  - If tags contain "party", "wedding", "event", "evening" -> "party"
+  - If tags contain "date", "dinner", "restaurant", "elegant" -> "hanging"
+  - Otherwise -> "casual"
+
 Size normalization:
 - For clothing (top, bottom, dress, outerwear, set): normalize to size codes like ["XS","S","M","L","XL","XXL","XXXL"].
 - For shoes: output only numeric strings like ["36","37","38","39","40"].
@@ -265,14 +266,14 @@ Size normalization:
 Rules:
 - Fix typos and normalize material/color names.
 - Use aboutThisItem bullets to build a concise description (max 30-40 words, no fluff).
-- Choose EXACTLY ONE of [office, party, casual, hanging] for category_occasion (and mirror it to category_folder).
+- Focus on identifying the correct category_type and rich style_tags.
 - Return ONLY raw JSON, no markdown, no explanation.
 `;
 
     const prompt = `
 You are an AI Fashion Product Data Cleaner. I will give you a raw product JSON from Amazon.
 Please correct typos, standardise fields (material, color), generate a short description based on "aboutThisItem",
-and classify it by occasion AND item type using the schema above.
+and classify it by item type (category_type) using the schema above. Focus on identifying the correct category_type and generating rich style_tags.
 
 ${schemaDescription}
 
@@ -292,6 +293,7 @@ ${JSON.stringify(rawProduct, null, 2)}
                             'You are an AI Data Cleaner for fashion products. ' +
                             'Always return ONLY valid JSON, no extra explanation. ' +
                             'Keep the generated description concise (max 30-40 words). ' +
+                            'Focus on identifying the correct category_type and generating rich style_tags. ' +
                             'Strictly follow the classification and size normalization rules in the schema.',
                     },
                     { role: 'user', content: prompt },
@@ -341,50 +343,37 @@ ${JSON.stringify(rawProduct, null, 2)}
         if (!parsed.image_url) {
             parsed.image_url = rawProduct.imageUrls?.[0] ?? '';
         }
-        if (!parsed.category_main || !parsed.category_sub) {
-            const inferred = inferCategory(rawProduct.title);
-            parsed.category_main = parsed.category_main || inferred.category_main;
-            parsed.category_sub = parsed.category_sub || inferred.category_sub;
-        }
 
-        const validOccasions: CategoryOccasion[] = ['casual', 'office', 'party', 'hanging'];
         const validTypes: CategoryType[] = ['top', 'bottom', 'dress', 'outerwear', 'shoes', 'bag', 'accessory', 'set'];
+        const validOccasions: CategoryOccasion[] = ['casual', 'office', 'party', 'hanging'];
 
-        // Normalize occasion fields
-        let occasion: CategoryOccasion =
-            parsed.category_occasion && validOccasions.includes(parsed.category_occasion)
-                ? parsed.category_occasion
-                : parsed.category_folder && validOccasions.includes(parsed.category_folder)
-                  ? parsed.category_folder
-                  : 'casual';
-
-        parsed.category_occasion = occasion;
-        parsed.category_folder = occasion; // keep legacy in sync
-
-        // Normalize type field
+        // Normalize category_type
         let typeFromModel: CategoryType | null =
             parsed.category_type && validTypes.includes(parsed.category_type) ? parsed.category_type : null;
 
         if (!typeFromModel) {
-            // Derive from category_main or inferred category
-            const inferred = inferCategory(rawProduct.title);
-            const mapping: Record<string, CategoryType> = {
-                outerwear: 'outerwear',
-                top: 'top',
-                bottom: 'bottom',
-                dress: 'dress',
-                shoes: 'shoes',
-                accessory: 'accessory',
-                set: 'set',
-            };
-            const fromMain =
-                parsed.category_main && mapping[parsed.category_main]
-                    ? mapping[parsed.category_main]
-                    : mapping[inferred.category_main];
-            typeFromModel = fromMain || 'top';
+            // Infer from title
+            typeFromModel = inferCategoryType(rawProduct.title);
         }
 
         parsed.category_type = typeFromModel;
+
+        // Infer category_folder from style_tags/occasion_tags if not provided
+        if (!parsed.category_folder || !validOccasions.includes(parsed.category_folder)) {
+            const styleTags = (parsed.style_tags || []).map((tag: string) => tag.toLowerCase()).join(' ');
+            const occasionTags = (parsed.occasion_tags || []).map((tag: string) => tag.toLowerCase()).join(' ');
+            const allTags = `${styleTags} ${occasionTags}`.toLowerCase();
+
+            if (allTags.includes('office') || allTags.includes('work') || allTags.includes('business') || allTags.includes('professional')) {
+                parsed.category_folder = 'office';
+            } else if (allTags.includes('party') || allTags.includes('wedding') || allTags.includes('event') || allTags.includes('evening')) {
+                parsed.category_folder = 'party';
+            } else if (allTags.includes('date') || allTags.includes('dinner') || allTags.includes('restaurant') || allTags.includes('elegant')) {
+                parsed.category_folder = 'hanging';
+            } else {
+                parsed.category_folder = 'casual'; // Default fallback
+            }
+        }
 
         // Ensure arrays
         parsed.material = Array.isArray(parsed.material) ? parsed.material : [];
@@ -409,9 +398,8 @@ ${JSON.stringify(rawProduct, null, 2)}
 
         log.info('Product data enriched (LLM)', {
             id: enriched.id,
-            category: enriched.category_main,
-            category_occasion: enriched.category_occasion,
             category_type: enriched.category_type,
+            category_folder: enriched.category_folder,
             brand: enriched.brand,
         });
 

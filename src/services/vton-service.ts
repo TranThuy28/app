@@ -214,55 +214,71 @@ export class VtonService {
      *
      * @param userImageBase64 - Base64-encoded user image
      * @param productUrls - Array of product image URLs to composite
+     * @param userProfile - Optional user profile containing body measurements
+     * @param productDetails - Optional manifest details of items to extract (e.g., category/title)
      * @returns Base64-encoded result image
      */
     async generateVton(
         userImageBase64: string,
         productUrls: string[],
+        userProfile: any,
+        productDetails: string[] = [],
     ): Promise<{ success: boolean; image?: string; type?: 'vton' | 'composite'; warning?: string; error?: string }> {
         // Step A: Create outfit board (collage)
         console.log(`🎨 Creating outfit board from ${productUrls.length} product images...`);
         const outfitBoardBuffer = await this.createOutfitComposite(productUrls);
         const outfitBoardBase64 = outfitBoardBuffer.toString('base64');
 
-        // Step B: Construct simple multimodal prompt for Gemini 2.5 Flash
-        const prompt = `You are an expert AI fashion photographer and virtual stylist, specializing in hyper-realistic virtual try-on technology.
+        // Step B: Construct multimodal prompt for Gemini 2.5 Flash with body measurements
+        const bodyContext = `
+USER MEASUREMENTS:
+- Height: ${userProfile?.height_cm ?? 'unknown'}cm
+- Weight: ${userProfile?.weight_kg ?? 'unknown'}kg
+- Body Shape: ${userProfile?.body_shape ?? 'unknown'}
+- Distinctive Features: ${(userProfile?.body_features || []).join(', ')}
+`;
+
+        const prompt = `
+ROLE: You are an Elite AI Fashion Photographer and Digital Artist. You specialize in taking a person from a reference photo and dressing them in a new outfit with hyper-realistic lighting and physics.
 
 INPUTS:
-- Image 1 (Reference User): Provides the target person's face, hair, exact body pose, and the background environment.
-- Image 2 (Outfit Flat-Lay): Provides the complete set of clothing and accessories that must be worn.
+- Image 1 (The Muse): The target person. Reference for face, hair, pose, skin tone, and lighting.
+- Image 2 (The Wardrobe): A collection of clothing items to be worn.
 
-PRIMARY TASK:
-Generate a photorealistic, full-body photograph of the specific person from Image 1, now wearing EVERY single item depicted in the outfit flat-lay of Image 2.
+CONTEXT - BODY SPECS:
+- Height: ${userProfile?.height_cm || 'Standard'} cm
+- Weight: ${userProfile?.weight_kg || 'Standard'} kg
+- Shape: ${userProfile?.body_shape || 'Standard'}
+*(Note: If these metrics conflict significantly with the visual evidence in Image 1, prioritize the visual proportions of Image 1 to maintain realism).*
 
-STRICT CONSTRAINTS & EXECUTION GUIDELINES:
+TASK: Create a seamless, photorealistic fashion editorial shot of "The Muse" wearing "The Wardrobe".
 
-1.  **IDENTITY & POSE LOCK (CRITICAL):**
-    * The face, facial features, hair style, hair color, skin tone, and body proportions MUST be identical to Image 1. Do not swap faces or alter the person's identity.
-    * The exact body pose from Image 1 MUST be maintained. The new clothes must conform to this specific pose.
+GUIDELINES FOR CLOTHING TRANSFER (SMART FOCUS):
+1.  **Identify the Primary Item:** When looking at a product image in "The Wardrobe", identify the *main item* being sold (e.g., in a photo of Pants + Shoes, the Pants are the product).
+2.  **Ignore Distractions:**
+    * If a photo shows Pants but has Shoes -> **Ignore the shoes** (unless there is no other shoe image). Use the user's feet or specific shoe product if provided.
+    * If a photo shows a Top but has a model's face/glasses -> **Ignore the face/glasses**. Only take the fabric/design of the Top.
+3.  **Fabric Physics:**
+    * Do not "paste" the image. **Re-draw** the garment wrapping around the user's body.
+    * Apply proper lighting, shadows, and wrinkles matching the Muse's pose.
 
-2.  **COMPLETE OUTFIT TRANSFER:**
-    * **Mandatory Inclusion:** Every item visible in Image 2 (top, bottom, shoes, bag, hats, accessories) MUST be present in the final image. No missing items.
-    * **Realistic Replacement:** The user's original clothes in Image 1 must be completely removed and replaced by the items in Image 2.
+STRICT CONSTRAINTS:
+1.  **Identity Lock:** The face and hair MUST match Image 1 exactly.
+2.  **Natural Fit:** The clothes must fit the body described in the visual input of Image 1 (adjusted slightly for the weight/height data provided).
+3.  **No Hallucinations:** Do not add accessories (hats, glasses, jewelry) that are not in the source images.
 
-3.  **REALISTIC DRAPE & TEXTURE:**
-    * Clothes must NOT look like flat stickers. They must drape realistically over the user's body shape, showing realistic fabric folds, wrinkles, tension based on the pose, and accurate material textures (e.g., denim looks like denim, silk looks silky).
-    * Lighting on the new clothes must match the lighting in the original background of Image 1.
+NEGATIVE PROMPT:
+(collage style), (paper cutout), (distorted face), (changing identity), (extra shoes), (floating bags), (bad anatomy), (blurry), (low quality).
 
-4.  **ITEM PLACEMENT & COMPOSITION:**
-    * **Full-Body Shot:** The final image must be a full-body view to ensure shoes are clearly visible on the feet.
-    * **Bags & Accessories:** Bags must be held naturally in the hand or slung over the shoulder, consistent with the pose in Image 1. Never have items floating near the body.
-    * **Layering:** If Image 2 contains layers (e.g., a jacket over a shirt), they must be layered correctly on the user.
-
-5.  **ENVIRONMENT INTEGRATION:**
-    * Keep the background and environmental lighting exactly the same as Image 1 to ensure the result looks like a single, cohesive photograph.
-
-**NEGATIVE CONSTRAINTS (What to avoid):**
-(distorted face), (changed identity), (missing shoes), (missing bag), (floating clothes), (flat textures), (cartoonish), (blurry items), (original clothes visible underneath).`;
+OUTPUT FORMAT REQUIREMENT (STRICT):
+1. **NO CONVERSATIONAL TEXT:** Do NOT output "Here is the image", "I created this", or any introduction.
+2. **IMAGE ONLY:** Your response must contain ONLY the generated image (or the markdown/link to it).
+3. **SILENCE:** If you cannot generate the image, return a JSON error {"error": "reason"}. Do not chat.
+`;
 
         // Step C: Call Pinkyne API
         const endpoint = `${this.baseUrl.replace(/\/+$/, '')}/chat/completions`;
-
+        console.log('prompt', prompt);
         const payload = {
             model: 'gemini-2.5-flash-image-preview',
             messages: [
@@ -286,22 +302,22 @@ STRICT CONSTRAINTS & EXECUTION GUIDELINES:
         };
 
         try {
-            console.log('🤖 Sending VTON request to Pinkyne API...');
-            const response = await axios.post(endpoint, payload, {
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${this.apiKey}`,
-                },
+        console.log('🤖 Sending VTON request to Pinkyne API...');
+        const response = await axios.post(endpoint, payload, {
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${this.apiKey}`,
+            },
                 timeout: 60000, // 60 seconds
-            });
+        });
 
             // Extract base64 image data from the response
-            const imageBase64 = this.extractBase64FromResponse(response.data);
-            if (!imageBase64) {
-                throw new Error(
-                    `Failed to extract base64 image data from VTON response. Raw snippet: ${JSON.stringify(response.data).slice(0, 200)}`
-                );
-            }
+        const imageBase64 = this.extractBase64FromResponse(response.data);
+        if (!imageBase64) {
+            throw new Error(
+                `Failed to extract base64 image data from VTON response. Raw snippet: ${JSON.stringify(response.data).slice(0, 200)}`
+            );
+        }
             console.log('image gen success');
 
             return { success: true, image: imageBase64, type: 'vton' };

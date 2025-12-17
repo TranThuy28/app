@@ -27,7 +27,6 @@ interface SimplifiedProduct {
     title: string;
     color: string;
     category_type: string;
-    category_sub: string;
     price: number;
 }
 
@@ -211,7 +210,6 @@ export class SimpleStylist {
             title: p.title.length > 80 ? p.title.substring(0, 80) + '...' : p.title, // Truncate long titles
             color: p.color || '',
             category_type: p.category_type,
-            category_sub: (p.category_sub || '').length > 30 ? (p.category_sub || '').substring(0, 30) : (p.category_sub || ''), // Truncate long subcategories
             price: p.price,
             // Removed sizes - already pre-filtered by size logic, LLM doesn't need this
         }));
