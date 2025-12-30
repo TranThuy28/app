@@ -5,7 +5,7 @@ import { PlaywrightCrawler, log, RequestQueue } from 'crawlee';
 import type { PlaywrightCrawlingContext } from 'crawlee';
 import { firefox } from 'playwright';
 import { handleCaptchaBlocking, extractProductDetails, extractDynamicData, type ProductDetails } from './scraper.ts';
-import { enrichProduct } from './services/enricher.ts';
+import { enrichProduct, type ProductVariation } from './services/enricher.ts';
 import type { EnrichedProduct, CategoryOccasion, CategoryType } from './services/enricher.ts';
 import { scrapeProductFast } from './scraper-fast.ts';
 import { CookieManager } from './utils/cookie-manager.ts';
@@ -18,7 +18,10 @@ let cookieManager: CookieManager | null = null;
 // Track background enrichment jobs so the process doesn't exit early
 const activeProcessingPromises: Promise<void>[] = [];
 
-type RawProductForEnrichment = ProductDetails & { product_url?: string };
+type RawProductForEnrichment = ProductDetails & {
+    product_url?: string;
+    variations?: ProductVariation[];
+};
 
 /**
  * Append enriched products to hierarchical master JSON files.
@@ -381,7 +384,7 @@ const run = async () => {
     });
 
     // Sample Amazon category/search URL
-    const startUrl = 'https://www.amazon.com/s?k=night+out+tops&crid=38G7N4MMOWJVB&sprefix=night+out+t%C3%B3p%2Caps%2C341&ref=nb_sb_noss';
+    const startUrl = 'https://www.amazon.com/s?k=Evening+Clutch+Purses&crid=1FWN0Z4EA5EL3&sprefix=%2Caps%2C893&ref=nb_sb_noss_2';
 
     log.info('Starting crawler...', { startUrl });
 

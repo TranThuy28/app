@@ -6,6 +6,15 @@ export type CategoryOccasion = 'casual' | 'hanging' | 'office' | 'party';
 export type CategoryType = 'top' | 'bottom' | 'dress' | 'outerwear' | 'shoes' | 'bag' | 'accessory' | 'set';
 
 /**
+ * Product color variation interface for lazy loading
+ */
+export interface ProductVariation {
+    color_name: string;
+    image_url: string | null; // Null if not yet crawled
+    is_crawled: boolean;      // Flag to track status
+}
+
+/**
  * Enriched product data interface matching the strict schema
  */
 export interface EnrichedProduct {
@@ -40,6 +49,7 @@ export interface EnrichedProduct {
     is_set: boolean; // true if it's a 2-piece set
     productDetails: Record<string, string>; // Raw product details from web crawl
     aboutThisItem: string[]; // Raw "About this item" bullets from web crawl
+    variations?: ProductVariation[]; // Color variations with lazy loading support
 }
 
 /**
@@ -202,8 +212,11 @@ const normalizeSizes = (categoryType: CategoryType, rawSizes: unknown): string[]
 /**
  * Calls Pinkyne/Gemini LLM to enrich a single product.
  * Uses axios to send the raw product JSON and returns a cleaned, enriched product.
+ * Preserves any pre-scraped variations for hybrid/lazy-loading flows.
  */
-export const enrichProduct = async (rawProduct: ProductDetails & { product_url?: string }): Promise<EnrichedProduct> => {
+export const enrichProduct = async (
+    rawProduct: ProductDetails & { product_url?: string; variations?: ProductVariation[] }
+): Promise<EnrichedProduct> => {
     const apiKey = process.env.PINKYNE_API_KEY;
     if (!apiKey) {
         throw new Error('PINKYNE_API_KEY environment variable is not set');
@@ -393,6 +406,11 @@ ${JSON.stringify(rawProduct, null, 2)}
         // Always carry over raw details
         parsed.productDetails = rawProduct.productDetails ?? {};
         parsed.aboutThisItem = rawProduct.aboutThisItem ?? [];
+
+        // Preserve pre-scraped variations (hybrid crawler)
+        if (rawProduct.variations) {
+            parsed.variations = rawProduct.variations;
+        }
 
         const enriched: EnrichedProduct = parsed as EnrichedProduct;
 

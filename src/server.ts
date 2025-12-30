@@ -7,6 +7,8 @@ import path from 'path';
 import fs from 'fs';
 import { SimpleStylist } from './services/simple-stylist.ts';
 import { VtonService } from './services/vton-service.ts';
+import { crawlSpecificVariation } from './services/crawler.ts';
+import type { EnrichedProduct } from './services/enricher.ts';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -38,6 +40,75 @@ const upload = multer({ storage });
 
 const stylist = new SimpleStylist();
 const vtonService = new VtonService();
+
+/**
+ * Helper function to load a product by ID from JSON storage
+ * Searches through all category folders and JSON files
+ */
+function loadProductById(productId: string): { product: EnrichedProduct; filePath: string; category: string } | null {
+    const productsBasePath = path.join(storageRoot, 'products');
+    const categories: ('casual' | 'hanging' | 'office' | 'party')[] = ['casual', 'hanging', 'office', 'party'];
+
+    for (const category of categories) {
+        const categoryDir = path.join(productsBasePath, category);
+        
+        if (!fs.existsSync(categoryDir) || !fs.statSync(categoryDir).isDirectory()) {
+            continue;
+        }
+
+        try {
+            const files = fs.readdirSync(categoryDir);
+            const jsonFiles = files.filter(file => file.endsWith('.json'));
+
+            for (const jsonFile of jsonFiles) {
+                const filePath = path.join(categoryDir, jsonFile);
+                try {
+                    const raw = fs.readFileSync(filePath, 'utf-8');
+                    const data = JSON.parse(raw);
+                    
+                    if (Array.isArray(data)) {
+                        const product = (data as EnrichedProduct[]).find(p => p.id === productId);
+                        if (product) {
+                            return { product, filePath, category };
+                        }
+                    }
+                } catch (error) {
+                    console.error(`Error reading ${jsonFile}:`, error);
+                }
+            }
+        } catch (error) {
+            console.error(`Error reading category directory ${categoryDir}:`, error);
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Helper function to save a product back to its JSON file
+ */
+function saveProduct(product: EnrichedProduct, filePath: string): boolean {
+    try {
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        const data = JSON.parse(raw) as EnrichedProduct[];
+        
+        // Find and update the product
+        const index = data.findIndex(p => p.id === product.id);
+        if (index !== -1) {
+            data[index] = product;
+        } else {
+            // If not found, add it (shouldn't happen, but handle gracefully)
+            data.push(product);
+        }
+
+        // Write back to file
+        fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+        return true;
+    } catch (error) {
+        console.error(`Error saving product to ${filePath}:`, error);
+        return false;
+    }
+}
 
 app.post('/api/suggest', async (req, res) => {
   try {
@@ -187,6 +258,77 @@ app.delete('/api/products/:category/:id', (req, res) => {
   } catch (error) {
     console.error('Error deleting product:', error);
     res.status(500).json({ success: false, message: 'Failed to delete product' });
+  }
+});
+
+/**
+ * POST /api/fetch-variant
+ * Fetches a specific color variation image on-demand
+ */
+app.post('/api/fetch-variant', async (req, res) => {
+  try {
+    const { productId, colorName } = req.body;
+
+    if (!productId || !colorName) {
+      return res.status(400).json({ error: 'productId and colorName are required' });
+    }
+
+    // 1. Load product from JSON storage
+    const result = loadProductById(productId);
+    if (!result) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const { product, filePath } = result;
+
+    // Use product_url (which is the Amazon URL)
+    const originalUrl = product.product_url;
+    if (!originalUrl) {
+      return res.status(400).json({ error: 'Product URL not found' });
+    }
+
+    // 2. Run On-Demand Crawler
+    console.log(`Fetching specific color: ${colorName} for product ${productId}`);
+    const imageUrl = await crawlSpecificVariation(originalUrl, colorName);
+
+    if (imageUrl) {
+      // 3. Update JSON in memory
+      if (!product.variations) {
+        product.variations = [];
+      }
+
+      const variant = product.variations.find(
+        v => v.color_name.toLowerCase() === colorName.toLowerCase()
+      );
+
+      if (variant) {
+        variant.image_url = imageUrl;
+        variant.is_crawled = true;
+      } else {
+        // Fallback if variant wasn't in list for some reason
+        product.variations.push({
+          color_name: colorName,
+          image_url: imageUrl,
+          is_crawled: true,
+        });
+      }
+
+      // 4. Persist to Disk
+      const saved = saveProduct(product, filePath);
+      if (!saved) {
+        return res.status(500).json({ error: 'Failed to save product update' });
+      }
+
+      return res.json({ success: true, imageUrl });
+    } else {
+      return res.status(404).json({ error: 'Color image could not be fetched' });
+    }
+  } catch (error) {
+    console.error('Error fetching variant:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
   }
 });
 

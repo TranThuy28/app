@@ -1,6 +1,7 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { ProductDetails } from './scraper.ts';
+import { crawlInitialVariations } from './services/crawler.ts';
 
 // Cheerio API type
 type CheerioAPI = ReturnType<typeof cheerio.load>;
@@ -519,6 +520,15 @@ export const scrapeProductFast = async (
                     const selectedSizeElement = $('#inline-twister-expanded-dimension-text-size_name, #variation_size_name .selection').first();
                     const size = selectedSizeElement.length > 0 ? selectedSizeElement.text().trim() : sizes[0];
 
+                    // Hybrid initial variations crawler (Puppeteer-based)
+                    let variations: import('./services/enricher.ts').ProductVariation[] | undefined;
+                    try {
+                        variations = await crawlInitialVariations(url);
+                        console.log('Variations found:', variations.length);
+                    } catch (variationError) {
+                        console.warn(`Failed to crawl initial variations for ${url}:`, variationError);
+                    }
+
                     return {
                         title,
                         price,
@@ -528,6 +538,8 @@ export const scrapeProductFast = async (
                         colors,
                         productDetails,
                         aboutThisItem,
+                        // Optional variations array for lazy-loading support
+                        ...(variations ? { variations } : {}),
                     };
                 }
             }
