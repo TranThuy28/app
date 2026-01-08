@@ -8,6 +8,7 @@ import fs from 'fs';
 import { SimpleStylist } from './services/simple-stylist.ts';
 import { VtonService } from './services/vton-service.ts';
 import { crawlSpecificVariation } from './services/crawler.ts';
+import { analyzeFashionImage } from './services/visual-tagger.ts';
 import type { EnrichedProduct } from './services/enricher.ts';
 
 const app = express();
@@ -297,7 +298,7 @@ app.post('/api/fetch-variant', async (req, res) => {
         product.variations = [];
       }
 
-      const variant = product.variations.find(
+      let variant = product.variations.find(
         v => v.color_name.toLowerCase() === colorName.toLowerCase()
       );
 
@@ -306,20 +307,41 @@ app.post('/api/fetch-variant', async (req, res) => {
         variant.is_crawled = true;
       } else {
         // Fallback if variant wasn't in list for some reason
-        product.variations.push({
+        variant = {
           color_name: colorName,
           image_url: imageUrl,
           is_crawled: true,
-        });
+        };
+        product.variations.push(variant);
       }
 
-      // 4. Persist to Disk
+      // 4. Visual Enrichment: Analyze the newly fetched variation image
+      try {
+        console.log(`🎨 Analyzing visual style for on-demand color: ${colorName}...`);
+        const analysis = await analyzeFashionImage(imageUrl, product.title);
+        
+        if (analysis) {
+          variant.analysis = analysis;
+          console.log(`✅ Visual analysis complete for ${colorName}`);
+        } else {
+          console.warn(`⚠️  Visual analysis returned null for ${colorName}`);
+        }
+      } catch (analysisError) {
+        console.warn(`Failed to analyze image for ${colorName}:`, analysisError instanceof Error ? analysisError.message : String(analysisError));
+        // Continue even if analysis fails - we still have the image URL
+      }
+
+      // 5. Persist to Disk (with analysis data if available)
       const saved = saveProduct(product, filePath);
       if (!saved) {
         return res.status(500).json({ error: 'Failed to save product update' });
       }
 
-      return res.json({ success: true, imageUrl });
+      return res.json({ 
+        success: true, 
+        imageUrl,
+        analysis: variant.analysis || null // Include analysis if available
+      });
     } else {
       return res.status(404).json({ error: 'Color image could not be fetched' });
     }

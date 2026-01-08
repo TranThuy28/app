@@ -2,6 +2,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { ProductDetails } from './scraper.ts';
 import { crawlInitialVariations } from './services/crawler.ts';
+import { analyzeFashionImage } from './services/visual-tagger.ts';
 
 // Cheerio API type
 type CheerioAPI = ReturnType<typeof cheerio.load>;
@@ -525,6 +526,44 @@ export const scrapeProductFast = async (
                     try {
                         variations = await crawlInitialVariations(url);
                         console.log('Variations found:', variations.length);
+
+                        // Visual Enrichment: Analyze first 3 variations with valid images
+                        if (variations && variations.length > 0) {
+                            const topVariations = variations
+                                .filter(v => v.image_url && v.is_crawled)
+                                .slice(0, 3);
+
+                            if (topVariations.length > 0) {
+                                console.log(`🎨 Starting visual analysis for ${topVariations.length} variation(s)...`);
+
+                                // Parallel execution for visual analysis
+                                await Promise.all(
+                                    topVariations.map(async (variant) => {
+                                        try {
+                                            console.log(`🎨 Analyzing visual style for color: ${variant.color_name}...`);
+                                            const analysis = await analyzeFashionImage(
+                                                variant.image_url!,
+                                                title // Pass product title as context
+                                            );
+
+                                            if (analysis) {
+                                                variant.analysis = analysis;
+                                                console.log(`✅ Visual analysis complete for ${variant.color_name}`);
+                                            } else {
+                                                console.warn(`⚠️  Visual analysis returned null for ${variant.color_name}`);
+                                            }
+                                        } catch (err) {
+                                            console.warn(`Failed to analyze image for ${variant.color_name}:`, err instanceof Error ? err.message : String(err));
+                                            // Continue with other variations even if one fails
+                                        }
+                                    })
+                                );
+
+                                console.log(`✅ Visual enrichment complete for ${topVariations.length} variation(s)`);
+                            } else {
+                                console.log('⚠️  No variations with valid images found for visual analysis');
+                            }
+                        }
                     } catch (variationError) {
                         console.warn(`Failed to crawl initial variations for ${url}:`, variationError);
                     }

@@ -6,7 +6,7 @@ import type { PlaywrightCrawlingContext } from 'crawlee';
 import { firefox } from 'playwright';
 import { handleCaptchaBlocking, extractProductDetails, extractDynamicData, type ProductDetails } from './scraper.ts';
 import { enrichProduct, type ProductVariation } from './services/enricher.ts';
-import type { EnrichedProduct, CategoryOccasion, CategoryType } from './services/enricher.ts';
+import type { EnrichedProduct, CategoryType } from './services/enricher.ts';
 import { scrapeProductFast } from './scraper-fast.ts';
 import { CookieManager } from './utils/cookie-manager.ts';
 import * as fs from 'fs';
@@ -25,8 +25,9 @@ type RawProductForEnrichment = ProductDetails & {
 
 /**
  * Append enriched products to hierarchical master JSON files.
- * Each occasion + type pair has its own file: storage/products/{category_folder}/{category_type}.json
- * Example: storage/products/office/top.json
+ * Each aesthetic + type pair has its own file: storage/products/{category_folder}/{category_type}.json
+ * Example: storage/products/Cottagecore/top.json or storage/products/Streetwear/dress.json
+ * category_folder is now a Fashion Aesthetic string (e.g., "Cottagecore", "Streetwear", "Office")
  */
 const appendEnrichedToCategoryFiles = async (products: EnrichedProduct[]): Promise<void> => {
     if (products.length === 0) return;
@@ -34,22 +35,26 @@ const appendEnrichedToCategoryFiles = async (products: EnrichedProduct[]): Promi
     const grouped: Record<string, EnrichedProduct[]> = {};
 
     for (const p of products) {
-        // Use category_folder for storage organization
-        const occasion: CategoryOccasion = p.category_folder || 'casual';
+        // Use category_folder (Fashion Aesthetic) for storage organization
+        // Default to "Casual" if not provided
+        const aesthetic: string = p.category_folder || 'Casual';
         const type: CategoryType = p.category_type || 'top';
 
-        const key = `${occasion}/${type}`;
+        // Sanitize aesthetic string for filesystem (replace spaces/special chars)
+        const sanitizedAesthetic = aesthetic.replace(/[^a-zA-Z0-9-_]/g, '_');
+
+        const key = `${sanitizedAesthetic}/${type}`;
         if (!grouped[key]) grouped[key] = [];
         grouped[key].push({
             ...p,
-            category_folder: occasion,
+            category_folder: aesthetic, // Keep original aesthetic string in product data
             category_type: type,
         });
     }
 
     for (const [key, items] of Object.entries(grouped)) {
-        const [occasion, type] = key.split('/') as [CategoryOccasion, CategoryType];
-        const categoryFilePath = path.join('storage', 'products', occasion, `${type}.json`);
+        const [aesthetic, type] = key.split('/') as [string, CategoryType];
+        const categoryFilePath = path.join('storage', 'products', aesthetic, `${type}.json`);
         let existing: EnrichedProduct[] = [];
 
         if (fs.existsSync(categoryFilePath)) {
@@ -68,7 +73,7 @@ const appendEnrichedToCategoryFiles = async (products: EnrichedProduct[]): Promi
         fs.writeFileSync(categoryFilePath, JSON.stringify(combined, null, 2), 'utf-8');
 
         log.info(
-            `📦 Appended ${items.length} items to ${categoryFilePath} (occasion=${occasion}, type=${type}, total: ${combined.length})`,
+            `📦 Appended ${items.length} items to ${categoryFilePath} (aesthetic=${aesthetic}, type=${type}, total: ${combined.length})`,
         );
     }
 };
@@ -384,7 +389,7 @@ const run = async () => {
     });
 
     // Sample Amazon category/search URL
-    const startUrl = 'https://www.amazon.com/s?k=Evening+Clutch+Purses&crid=1FWN0Z4EA5EL3&sprefix=%2Caps%2C893&ref=nb_sb_noss_2';
+    const startUrl = 'https://www.amazon.com/s?k=preppy+fashion+clothes+for+women&crid=37DQCONSO238A&sprefix=preppy+fashion+clothes+for+women%2Caps%2C707&ref=nb_sb_noss_2';
 
     log.info('Starting crawler...', { startUrl });
 

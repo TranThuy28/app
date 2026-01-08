@@ -25,9 +25,11 @@ export interface UserProfile {
 interface SimplifiedProduct {
     id: string;
     title: string;
-    color: string;
+    brand: string;
     category_type: string;
+    category_folder: string; // Fashion Aesthetic
     price: number;
+    variations_summary: string; // e.g., "Available in [Black, Pink, Blue]. Top Vibes: [Elegant, Party, Office]."
 }
 
 /**
@@ -201,22 +203,68 @@ export class SimpleStylist {
     }
 
     /**
+     * Summarizes product variations for LLM display
+     */
+    private summarizeVariations(product: EnrichedProduct): string {
+        if (!product.variations || product.variations.length === 0) {
+            return 'Single color/style available.';
+        }
+
+        const colors: string[] = [];
+        const allVibes = new Set<string>();
+        const allOccasions = new Set<string>();
+
+        for (const variation of product.variations) {
+            if (variation.color_name) {
+                colors.push(variation.color_name);
+            }
+            if (variation.analysis) {
+                if (variation.analysis.vibes) {
+                    variation.analysis.vibes.forEach(v => allVibes.add(v));
+                }
+                if (variation.analysis.occasions) {
+                    variation.analysis.occasions.forEach(o => allOccasions.add(o));
+                }
+            }
+        }
+
+        const uniqueColors = Array.from(new Set(colors));
+        const topVibes = Array.from(allVibes).slice(0, 3);
+        const topOccasions = Array.from(allOccasions).slice(0, 3);
+
+        let summary = `Available in [${uniqueColors.join(', ')}]`;
+        if (topVibes.length > 0) {
+            summary += `. Top Vibes: [${topVibes.join(', ')}]`;
+        }
+        if (topOccasions.length > 0) {
+            summary += `. Occasions: [${topOccasions.join(', ')}]`;
+        }
+        return summary;
+    }
+
+    /**
      * Simplifies products for LLM (to save tokens)
      * Removes sizes (already pre-filtered), strips long text, keeps only essential styling data
+     * Now includes variation summaries instead of single color
      */
     private simplifyProducts(products: EnrichedProduct[]): SimplifiedProduct[] {
         return products.map(p => ({
             id: p.id,
             title: p.title.length > 80 ? p.title.substring(0, 80) + '...' : p.title, // Truncate long titles
-            color: p.color || '',
+            brand: p.brand || 'Unknown',
             category_type: p.category_type,
+            category_folder: p.category_folder || 'Casual', // Fashion Aesthetic
             price: p.price,
+            variations_summary: this.summarizeVariations(p),
             // Removed sizes - already pre-filtered by size logic, LLM doesn't need this
         }));
     }
 
     /**
-     * Maps user message keywords to an array of category folders.
+     * Maps user message keywords to an array of category folders (storage directories).
+     * NOTE: This maps to storage folder names (casual, hanging, office, party), not the new
+     * Fashion Aesthetic system. The new schema uses category_folder as Fashion Aesthetic,
+     * but storage is still organized by these legacy folder names.
      * Allows cross-category styling by returning multiple categories.
      */
     private mapMessageToCategory(userMessage: string): string[] {
@@ -318,8 +366,54 @@ export class SimpleStylist {
     }
 
     /**
+     * Checks if a product matches query based on variations analysis
+     */
+    private productMatchesQuery(product: EnrichedProduct, queryTokens: string[]): boolean {
+        const lowerQuery = queryTokens.join(' ').toLowerCase();
+        
+        // Check title and aesthetic
+        if (product.title.toLowerCase().includes(lowerQuery) || 
+            product.category_folder?.toLowerCase().includes(lowerQuery)) {
+            return true;
+        }
+
+        // Check variations for color, vibes, occasions
+        if (product.variations) {
+            for (const variation of product.variations) {
+                // Check color name
+                if (variation.color_name && 
+                    queryTokens.some(token => variation.color_name.toLowerCase().includes(token.toLowerCase()))) {
+                    return true;
+                }
+                
+                // Check analysis
+                if (variation.analysis) {
+                    // Check vibes
+                    if (variation.analysis.vibes && 
+                        variation.analysis.vibes.some(vibe => 
+                            queryTokens.some(token => vibe.toLowerCase().includes(token.toLowerCase()))
+                        )) {
+                        return true;
+                    }
+                    
+                    // Check occasions
+                    if (variation.analysis.occasions && 
+                        variation.analysis.occasions.some(occasion => 
+                            queryTokens.some(token => occasion.toLowerCase().includes(token.toLowerCase()))
+                        )) {
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        return false;
+    }
+
+    /**
      * Smart filtering: scores products based on user query keywords and balances by item type.
      * Returns balanced items up to maxItems (default ~35-40 for single request, ~300 for parallel).
+     * Updated to work with Visual-First schema (variations-based matching).
      */
     private smartFilter(products: EnrichedProduct[], userQuery: string, maxItems: number = 40): EnrichedProduct[] {
         // Step A: Scoring
@@ -328,18 +422,53 @@ export class SimpleStylist {
 
         const scoredProducts = products.map(product => {
             let score = 0;
-            const searchText = `${product.title} ${product.color} ${(product.style_tags || []).join(' ')}`.toLowerCase();
 
-            // Check each query token against product fields
+            // Check title match
             for (const token of queryTokens) {
                 if (product.title.toLowerCase().includes(token)) {
                     score += 10;
                 }
-                if (product.color && product.color.toLowerCase().includes(token)) {
-                    score += 10;
+                
+                // Check aesthetic (category_folder)
+                if (product.category_folder && product.category_folder.toLowerCase().includes(token)) {
+                    score += 8;
                 }
-                if (product.style_tags && product.style_tags.some(tag => tag.toLowerCase().includes(token))) {
-                    score += 10;
+            }
+
+            // Check variations for color, vibes, occasions
+            if (product.variations) {
+                for (const variation of product.variations) {
+                    // Check color name
+                    for (const token of queryTokens) {
+                        if (variation.color_name && variation.color_name.toLowerCase().includes(token)) {
+                            score += 10;
+                        }
+                    }
+                    
+                    // Check analysis
+                    if (variation.analysis) {
+                        // Check vibes
+                        if (variation.analysis.vibes) {
+                            for (const vibe of variation.analysis.vibes) {
+                                for (const token of queryTokens) {
+                                    if (vibe.toLowerCase().includes(token)) {
+                                        score += 8;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Check occasions
+                        if (variation.analysis.occasions) {
+                            for (const occasion of variation.analysis.occasions) {
+                                for (const token of queryTokens) {
+                                    if (occasion.toLowerCase().includes(token)) {
+                                        score += 8;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -594,7 +723,7 @@ export class SimpleStylist {
 
         // Step 9: Final assembly - retrieve full product details
         const mergedResponse: LLMOutfitResponse = { outfits: allOutfits };
-        const outfits = await this.assembleOutfits(mergedResponse, filteredProducts);
+        const outfits = await this.assembleOutfits(mergedResponse, filteredProducts, userProfile);
 
         // Shuffle and limit to 10 outfits for diversity
         const shuffledOutfits = this.shuffle(outfits).slice(0, 10);
@@ -619,6 +748,8 @@ CONTEXT:
 - **User Profile:** ${JSON.stringify(userProfile, null, 2)}
 - **User Request:** "${userQuery}"
 - **Wardrobe Inventory:** ${JSON.stringify(candidates, null, 2)}
+
+NOTE: Each product includes a "variations_summary" field showing available colors and style vibes. Use this to make informed color and style choices.
 YOUR MISSION:
 Curate exactly ${this.OUTFITS_PER_REQUEST} distinct, high-end outfits that not only meet the user's request but elevate their personal style. Do not just pick items; *style* them. Each outfit must be unique and different from the others.
 STYLING GUIDELINES (Strictly Adhere):
@@ -710,12 +841,63 @@ Return valid JSON with this exact structure. You MUST return exactly ${this.OUTF
     }
 
     /**
+     * Selects the best variation image for a product based on user preferences and context
+     */
+    private selectBestVariationImage(
+        product: EnrichedProduct,
+        userProfile: UserProfile,
+        context?: string
+    ): string {
+        // If no variations, use main image
+        if (!product.variations || product.variations.length === 0) {
+            return product.image_url;
+        }
+
+        // Try to match user color preferences
+        if (userProfile.color_preferences && userProfile.color_preferences.length > 0) {
+            for (const prefColor of userProfile.color_preferences) {
+                const matching = product.variations.find(v => 
+                    v.color_name && 
+                    v.color_name.toLowerCase().includes(prefColor.toLowerCase()) &&
+                    v.image_url
+                );
+                if (matching && matching.image_url) {
+                    return matching.image_url;
+                }
+            }
+        }
+
+        // Try to match context (e.g., if context mentions "pink", find pink variation)
+        if (context) {
+            const lowerContext = context.toLowerCase();
+            for (const variation of product.variations) {
+                if (variation.color_name && 
+                    variation.color_name.toLowerCase().includes(lowerContext) &&
+                    variation.image_url) {
+                    return variation.image_url;
+                }
+            }
+        }
+
+        // Use first variation with image
+        const firstWithImage = product.variations.find(v => v.image_url);
+        if (firstWithImage && firstWithImage.image_url) {
+            return firstWithImage.image_url;
+        }
+
+        // Fallback to main image
+        return product.image_url;
+    }
+
+    /**
      * Assembles full outfit details from LLM response item IDs
      * Enforces logical wardrobe constraints to prevent duplicate item types
+     * Updates product images to use best variation based on user preferences
      */
     private async assembleOutfits(
         llmResponse: LLMOutfitResponse,
         allProducts: EnrichedProduct[],
+        userProfile?: UserProfile,
     ): Promise<Array<{ name: string; reasoning: string; items: EnrichedProduct[] }>> {
         const productMap = new Map<string, EnrichedProduct>();
         allProducts.forEach(p => productMap.set(p.id, p));
@@ -785,10 +967,23 @@ Return valid JSON with this exact structure. You MUST return exactly ${this.OUTF
                     return null;
                 }
 
+                // Update items to use best variation images
+                const itemsWithBestImages = filteredItems.map(item => {
+                    const bestImage = this.selectBestVariationImage(
+                        item,
+                        userProfile || {},
+                        outfit.reasoning
+                    );
+                    return {
+                        ...item,
+                        image_url: bestImage, // Override with best variation image
+                    };
+                });
+
                 return {
                     name: outfit.name,
                     reasoning: outfit.reasoning,
-                    items: filteredItems,
+                    items: itemsWithBestImages,
                 };
             })
             .filter((outfit): outfit is { name: string; reasoning: string; items: EnrichedProduct[] } => outfit !== null);
